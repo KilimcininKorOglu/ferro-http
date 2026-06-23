@@ -1,0 +1,11 @@
+[package]
+name = "ferro-embedded"
+description = "no_std smoltcp transport for the ferro web server (embedded profile)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ferro-core = { path = "../core" }
+smoltcp = { version = "0.11.0", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp"] }

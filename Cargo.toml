@@ -1,9 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/std-server"]
+members = ["crates/core", "crates/std-server", "crates/embedded"]
 
-# `embedded-server` (no_std + smoltcp bare-metal binary) is deferred to Faz 7;
-# it cannot be built before its panic handler, allocator, and transport exist.
+# `crates/embedded` (ferro-embedded) holds the no_std smoltcp transport and is a
+# host-buildable library, so its loopback transport test runs under `cargo test`.
+# The bare-metal `embedded-server` binary (panic handler, allocator, entry point)
+# is excluded from the workspace because it cannot link for the host target.
 
 [workspace.package]
 version = "0.0.1"
