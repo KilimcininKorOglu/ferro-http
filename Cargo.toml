@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/std-server"]
+
+# `embedded-server` (no_std + smoltcp bare-metal binary) is deferred to Faz 7;
+# it cannot be built before its panic handler, allocator, and transport exist.
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

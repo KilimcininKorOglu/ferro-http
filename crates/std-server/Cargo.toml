@@ -1,0 +1,14 @@
+[package]
+name = "ferro"
+description = "A near-zero-dependency, multi-platform HTTP server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ferro"
+path = "src/main.rs"
+
+[dependencies]
+ferro-core = { path = "../core" }
