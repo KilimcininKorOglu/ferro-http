@@ -25,6 +25,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          # OpenWRT / embedded Linux arches, cross-compiled via `cross`.
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            cross: true
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            cross: true
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-latest
@@ -37,9 +44,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Install musl tools
-        if: contains(matrix.target, 'musl')
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build
+      - name: Install cross
+        if: matrix.cross
+        run: |
+          curl -sL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv cross /usr/local/bin/
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release -p ferro --target ${{ matrix.target }} --features "${{ env.RELEASE_FEATURES }}"
+      - name: Build (cargo)
+        if: ${{ !matrix.cross }}
         run: cargo build --release -p ferro --target ${{ matrix.target }} --features "${{ env.RELEASE_FEATURES }}"
       - name: Package
         shell: bash
