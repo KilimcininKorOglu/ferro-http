@@ -424,6 +424,7 @@ fn tls_read_in(
     tls: &mut rustls::ServerConnection,
     state: &mut Connection,
 ) -> bool {
+    let mut buf = [0u8; READ_CHUNK];
     loop {
         match tls.read_tls(socket) {
             Ok(0) => return true, // peer closed the TCP connection
@@ -431,19 +432,21 @@ fn tls_read_in(
                 if tls.process_new_packets().is_err() {
                     return true; // TLS protocol error; drop the connection
                 }
+                // Drain decrypted plaintext between reads, not only at the end:
+                // rustls bounds its internal plaintext buffer and `read_tls`
+                // errors once it fills, so a body larger than that buffer must
+                // be consumed as it arrives or the connection would be dropped.
+                loop {
+                    match tls.reader().read(&mut buf) {
+                        Ok(0) => break, // nothing more buffered right now
+                        Ok(n) => state.feed(&buf[..n]),
+                        Err(_) => break, // WouldBlock or transient
+                    }
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return true,
-        }
-    }
-    // Drain any decrypted plaintext now available into the state machine.
-    let mut buf = [0u8; READ_CHUNK];
-    loop {
-        match tls.reader().read(&mut buf) {
-            Ok(0) => break, // no more plaintext buffered (or clean TLS EOF)
-            Ok(n) => state.feed(&buf[..n]),
-            Err(_) => break, // WouldBlock or transient: nothing more to drain now
         }
     }
     false
