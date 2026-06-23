@@ -195,6 +195,130 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Serializes the configuration back to JSON matching the documented schema.
+    ///
+    /// Round-trips with [`from_json_str`]: parsing the output yields an equal
+    /// `Config`. Used to persist edits made at runtime (e.g. from the admin
+    /// panel) back to `config.json`.
+    pub fn to_json_string(&self) -> String {
+        let mut out = String::new();
+        out.push_str("{\n");
+
+        out.push_str("  \"server\": {\n");
+        out.push_str(&format!(
+            "    \"bind\": \"{}\",\n",
+            escape_json(&self.server.bind)
+        ));
+        out.push_str(&format!("    \"port\": {},\n", self.server.port));
+        out.push_str(&format!(
+            "    \"worker_threads\": {},\n",
+            self.server.worker_threads
+        ));
+        out.push_str(&format!(
+            "    \"max_connections\": {},\n",
+            self.server.max_connections
+        ));
+        out.push_str(&format!(
+            "    \"keep_alive_secs\": {},\n",
+            self.server.keep_alive_secs
+        ));
+        out.push_str(&format!(
+            "    \"read_timeout_secs\": {},\n",
+            self.server.read_timeout_secs
+        ));
+        out.push_str(&format!(
+            "    \"request_max_bytes\": {}\n",
+            self.server.request_max_bytes
+        ));
+        out.push_str("  },\n");
+
+        out.push_str("  \"static\": {\n");
+        out.push_str(&format!(
+            "    \"root\": \"{}\",\n",
+            escape_json(&self.static_files.root)
+        ));
+        out.push_str(&format!(
+            "    \"index_files\": {},\n",
+            json_string_array(&self.static_files.index_files)
+        ));
+        out.push_str(&format!(
+            "    \"follow_symlinks\": {},\n",
+            self.static_files.follow_symlinks
+        ));
+        out.push_str(&format!(
+            "    \"directory_listing\": {}\n",
+            self.static_files.directory_listing
+        ));
+        out.push_str("  },\n");
+
+        out.push_str("  \"compression\": {\n");
+        out.push_str(&format!("    \"gzip\": {},\n", self.compression.gzip));
+        out.push_str(&format!(
+            "    \"min_bytes\": {}\n",
+            self.compression.min_bytes
+        ));
+        out.push_str("  },\n");
+
+        out.push_str("  \"security\": {\n");
+        out.push_str(&format!(
+            "    \"enable_security_headers\": {},\n",
+            self.security.enable_security_headers
+        ));
+        out.push_str("    \"rate_limit\": {\n");
+        out.push_str(&format!(
+            "      \"enabled\": {},\n",
+            self.security.rate_limit.enabled
+        ));
+        out.push_str(&format!(
+            "      \"requests\": {},\n",
+            self.security.rate_limit.requests
+        ));
+        out.push_str(&format!(
+            "      \"window_secs\": {},\n",
+            self.security.rate_limit.window_secs
+        ));
+        out.push_str(&format!(
+            "      \"ban_secs\": {}\n",
+            self.security.rate_limit.ban_secs
+        ));
+        out.push_str("    },\n");
+        out.push_str(&format!(
+            "    \"blocked_patterns\": {}\n",
+            json_string_array(&self.security.blocked_patterns)
+        ));
+        out.push_str("  },\n");
+
+        out.push_str("  \"tls\": {\n");
+        out.push_str(&format!("    \"enabled\": {},\n", self.tls.enabled));
+        out.push_str(&format!(
+            "    \"cert_path\": \"{}\",\n",
+            escape_json(&self.tls.cert_path)
+        ));
+        out.push_str(&format!(
+            "    \"key_path\": \"{}\"\n",
+            escape_json(&self.tls.key_path)
+        ));
+        out.push_str("  },\n");
+
+        out.push_str("  \"logging\": {\n");
+        out.push_str(&format!(
+            "    \"level\": \"{}\",\n",
+            escape_json(&self.logging.level)
+        ));
+        out.push_str(&format!(
+            "    \"access_log\": {}\n",
+            self.logging.access_log
+        ));
+        out.push_str("  },\n");
+
+        out.push_str("  \"mime_overrides\": ");
+        out.push_str(&json_string_object(&self.mime_overrides));
+        out.push('\n');
+
+        out.push_str("}\n");
+        out
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.server.port == 0 {
             return Err(ConfigError::invalid("server.port", "must be 1-65535"));
@@ -473,6 +597,58 @@ impl ConfigError {
     }
 }
 
+/// Escapes a string for embedding in JSON (quotes, backslashes, control chars).
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Serializes a list of strings as a compact JSON array.
+fn json_string_array(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push('"');
+        out.push_str(&escape_json(item));
+        out.push('"');
+    }
+    out.push(']');
+    out
+}
+
+/// Serializes string key/value pairs as a JSON object (for `mime_overrides`).
+fn json_string_object(pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return String::from("{}");
+    }
+    let mut out = String::from("{");
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("\n    \"");
+        out.push_str(&escape_json(k));
+        out.push_str("\": \"");
+        out.push_str(&escape_json(v));
+        out.push('"');
+    }
+    out.push_str("\n  }");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +775,46 @@ mod tests {
             err,
             ConfigError::InvalidValue { path, .. } if path == "tls.cert_path"
         ));
+    }
+
+    #[test]
+    fn default_config_round_trips_through_json() {
+        let cfg = Config::default();
+        let parsed = Config::from_json_str(&cfg.to_json_string()).expect("parse default");
+        assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn populated_config_round_trips_through_json() {
+        // Serializing then parsing must reproduce the value exactly, so runtime
+        // edits persisted to config.json do not drift from what is running.
+        let mut cfg = Config::default();
+        cfg.server.bind = "127.0.0.1".to_string();
+        cfg.server.port = 9090;
+        cfg.server.worker_threads = 4;
+        cfg.static_files.root = "/srv/www".to_string();
+        cfg.static_files.index_files = Vec::from(["home.html".to_string()]);
+        cfg.static_files.follow_symlinks = true;
+        cfg.security.enable_security_headers = true;
+        cfg.security.blocked_patterns = Vec::from(["/admin".to_string(), "/private".to_string()]);
+        cfg.tls.enabled = true;
+        cfg.tls.cert_path = "/c.pem".to_string();
+        cfg.tls.key_path = "/k.pem".to_string();
+        cfg.logging.level = "debug".to_string();
+        cfg.mime_overrides = Vec::from([
+            (".wasm".to_string(), "application/wasm".to_string()),
+            (".avif".to_string(), "image/avif".to_string()),
+        ]);
+        let parsed = Config::from_json_str(&cfg.to_json_string()).expect("parse populated");
+        assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn serialized_strings_are_escaped() {
+        // A value with quotes/backslashes must survive the round trip intact.
+        let mut cfg = Config::default();
+        cfg.static_files.root = "/a\"b\\c\tend".to_string();
+        let parsed = Config::from_json_str(&cfg.to_json_string()).expect("parse escaped");
+        assert_eq!(parsed.static_files.root, "/a\"b\\c\tend");
     }
 }
