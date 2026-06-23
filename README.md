@@ -1,6 +1,6 @@
 # ferro
 
-A near-zero-dependency, JSON-configured, multi-platform HTTP/1.1 server written in Rust.
+A multi-platform HTTP/1.1 server written in Rust.
 
 ferro is built around a single allocation-only `no_std` core that holds all HTTP
 logic, exposed through narrow seam traits and driven by two build-time profiles:
