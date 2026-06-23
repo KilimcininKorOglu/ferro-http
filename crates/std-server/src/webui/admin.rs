@@ -15,7 +15,7 @@ use ferro_core::http::status::StatusCode;
 use ferro_core::service::{RequestContext, Service};
 
 use crate::app::App;
-use crate::webui::sha256::basic_auth_ok;
+use crate::webui::sha256::{basic_auth_ok, password_matches, sha256_hex};
 use crate::webui::stats::Stats;
 
 /// The embedded admin panel, with no external resources.
@@ -81,6 +81,7 @@ impl WebAdmin {
                 StatusCode::OK,
                 &format!("{{\"en\":{},\"tr\":{}}}", I18N_EN.trim(), I18N_TR.trim()),
             ),
+            (Method::Post, "/admin/api/password") => self.change_password(&request.body),
             _ => json_error(StatusCode::NOT_FOUND, "no such admin endpoint"),
         }
     }
@@ -123,6 +124,54 @@ impl WebAdmin {
             StatusCode::OK,
             &format!("{{\"ok\":true,\"restart_required\":[{list}]}}"),
         )
+    }
+
+    /// Changes the admin password: verifies the current password, hashes the
+    /// new one, persists the config to disk, and updates the live credentials.
+    /// Body: `{"current_password": "...", "new_password": "..."}`.
+    fn change_password(&self, body: &[u8]) -> Response {
+        let text = match core::str::from_utf8(body) {
+            Ok(text) => text,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "body is not valid UTF-8"),
+        };
+        let parsed = match ferro_core::json::parse(text) {
+            Ok(value) => value,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid JSON body"),
+        };
+        let current = parsed
+            .get("current_password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let new_password = parsed
+            .get("new_password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if new_password.is_empty() {
+            return json_error(StatusCode::BAD_REQUEST, "new password must not be empty");
+        }
+        // Verify the current password against the running hash, then build the
+        // updated config off it.
+        let new_config = {
+            let state = self.read_state();
+            if !password_matches(current, &state.config.admin.password_sha256) {
+                return json_error(StatusCode::UNAUTHORIZED, "current password is incorrect");
+            }
+            let mut config = state.config.clone();
+            config.admin.password_sha256 = sha256_hex(new_password.as_bytes());
+            config
+        };
+        // Persist before swapping, so a write failure leaves credentials intact.
+        if let Err(e) = std::fs::write(&self.config_path, new_config.to_json_string()) {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("could not write config: {e}"),
+            );
+        }
+        {
+            let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+            state.config = new_config;
+        }
+        Response::json(StatusCode::OK, "{\"ok\":true}")
     }
 
     /// True when the request carries valid admin credentials.

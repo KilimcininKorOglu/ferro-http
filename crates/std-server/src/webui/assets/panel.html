@@ -29,6 +29,14 @@
   #msg { font-size:13px; }
   #msg.ok { color:var(--ok); }
   #msg.err { color:var(--err); }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; padding:16px; }
+  .modal-bg.open { display:flex; }
+  .modal { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; width:100%; max-width:380px; }
+  .modal h3 { margin:0 0 6px; font-size:16px; }
+  .modal label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
+  .modal input { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:9px 12px; font-size:14px; }
+  .modal .row { justify-content:flex-end; }
+  #pw-msg { font-size:13px; margin-right:auto; color:var(--err); }
   @media (max-width:560px){ main{padding:14px;} .stat .v{font-size:19px;} }
 </style>
 </head>
@@ -59,10 +67,28 @@
     <div class="row">
       <button id="save" data-i18n="config.save">Save &amp; apply</button>
       <button id="reload" class="secondary" data-i18n="config.reload">Reload from server</button>
+      <button id="passwd" class="secondary" data-i18n="config.password">Change password</button>
       <span id="msg"></span>
     </div>
   </section>
 </main>
+
+<div class="modal-bg" id="pw-modal">
+  <div class="modal">
+    <h3 data-i18n="password.title">Change password</h3>
+    <label data-i18n="password.current">Current password</label>
+    <input type="password" id="pw-cur" autocomplete="current-password">
+    <label data-i18n="password.new">New password</label>
+    <input type="password" id="pw-new" autocomplete="new-password">
+    <label data-i18n="password.confirm">Confirm new password</label>
+    <input type="password" id="pw-conf" autocomplete="new-password">
+    <div class="row">
+      <span id="pw-msg"></span>
+      <button id="pw-cancel" class="secondary" data-i18n="password.cancel">Cancel</button>
+      <button id="pw-submit" data-i18n="password.submit">Change</button>
+    </div>
+  </div>
+</div>
 <script>
   var $ = function (id) { return document.getElementById(id); };
   var I18N = {};
@@ -118,8 +144,27 @@
       .catch(function () { setMsg(t('config.request_failed'), false); });
   }
 
+  function setPwMsg(text) { $('pw-msg').textContent = text; }
+  function openPw() { $('pw-cur').value = ''; $('pw-new').value = ''; $('pw-conf').value = ''; setPwMsg(''); $('pw-modal').classList.add('open'); }
+  function closePw() { $('pw-modal').classList.remove('open'); }
+  function submitPw() {
+    var cur = $('pw-cur').value, nw = $('pw-new').value, cf = $('pw-conf').value;
+    if (!nw) { setPwMsg(t('password.empty')); return; }
+    if (nw !== cf) { setPwMsg(t('password.mismatch')); return; }
+    fetch('/admin/api/password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current_password: cur, new_password: nw }) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok) { setPwMsg(t('password.failed') + ' ' + (res.body.error || '')); return; }
+        closePw(); setMsg(t('password.changed'), true);
+      })
+      .catch(function () { setPwMsg(t('config.request_failed')); });
+  }
+
   $('save').addEventListener('click', saveConfig);
   $('reload').addEventListener('click', loadConfig);
+  $('passwd').addEventListener('click', openPw);
+  $('pw-cancel').addEventListener('click', closePw);
+  $('pw-submit').addEventListener('click', submitPw);
   loadI18n().then(function () { loadConfig(); });
   loadStats();
   setInterval(loadStats, 3000);

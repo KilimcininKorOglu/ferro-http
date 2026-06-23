@@ -129,6 +129,15 @@ pub fn basic_auth_ok(header: &str, username: &str, password_sha256: &str) -> boo
         & constant_time_eq(pass_hash.as_bytes(), password_sha256.as_bytes())
 }
 
+/// Verifies a plaintext password against a stored lowercase-hex SHA-256 digest,
+/// in constant time. Used to confirm the current password before changing it.
+pub fn password_matches(password: &str, password_sha256: &str) -> bool {
+    constant_time_eq(
+        sha256_hex(password.as_bytes()).as_bytes(),
+        password_sha256.as_bytes(),
+    )
+}
+
 /// Length-checked, constant-time byte comparison (no early exit on first diff).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -231,5 +240,13 @@ mod tests {
         assert!(!basic_auth_ok("Bearer YWRtaW46c2VjcmV0", "admin", &hash)); // wrong scheme
         assert!(!basic_auth_ok("", "admin", &hash)); // no header
         assert!(!basic_auth_ok("Basic YWRtaW46c2VjcmV0", "", "")); // empty config
+    }
+
+    #[test]
+    fn password_matches_only_the_right_password() {
+        let hash = sha256_hex(b"secret");
+        assert!(password_matches("secret", &hash));
+        assert!(!password_matches("wrong", &hash));
+        assert!(!password_matches("secret", "")); // empty stored hash never matches
     }
 }
