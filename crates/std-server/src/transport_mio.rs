@@ -112,6 +112,8 @@ fn accept_all(
                     // Over capacity: drop the socket, closing it.
                     continue;
                 }
+                // Disable Nagle's algorithm: send small responses immediately.
+                let _ = socket.set_nodelay(true);
                 let token = Token(*next_token);
                 *next_token += 1;
                 if poll
