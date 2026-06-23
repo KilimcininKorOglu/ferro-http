@@ -21,6 +21,7 @@ pub mod handler;
 pub mod http;
 pub mod json;
 pub mod router;
+pub mod security;
 pub mod service;
 
 /// Crate version, surfaced so profile binaries can report a build identity.

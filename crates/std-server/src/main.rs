@@ -16,6 +16,7 @@ use ferro_core::http::request::Request;
 use ferro_core::http::response::Response;
 use ferro_core::http::status::StatusCode;
 use ferro_core::router::{Params, Router};
+use ferro_core::security::RateLimiter;
 
 use app::App;
 use fs_assets::FsAssets;
@@ -44,11 +45,19 @@ fn main() {
     let mut router = Router::new();
     router.route(Method::Get, "/api/health", health);
 
+    let rate_limiter = config
+        .security
+        .rate_limit
+        .enabled
+        .then(|| RateLimiter::new(config.security.rate_limit.clone()));
+
     let app = App::new(
         router,
         FsAssets::new(&config.static_files.root),
         config.static_files.index_files.clone(),
         config.mime_overrides.clone(),
+        rate_limiter,
+        config.logging.access_log,
     );
 
     let options = Options {

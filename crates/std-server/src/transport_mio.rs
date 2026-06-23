@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use mio::net::{TcpListener, TcpStream};
@@ -49,16 +49,32 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(socket: TcpStream, token: Token, security_headers: bool, max_body: usize) -> Conn {
+    fn new(
+        socket: TcpStream,
+        token: Token,
+        security_headers: bool,
+        max_body: usize,
+        peer: [u8; 16],
+    ) -> Conn {
         Conn {
             socket,
             token,
-            state: Connection::with_policy(ResponsePolicy { security_headers }).max_body(max_body),
+            state: Connection::with_policy(ResponsePolicy { security_headers })
+                .max_body(max_body)
+                .peer(peer),
             out: Vec::new(),
             wants_write: false,
             close_after_flush: false,
             last_activity: Instant::now(),
         }
+    }
+}
+
+/// Maps a peer socket address to a 16-byte key (IPv4 is IPv6-mapped).
+fn ip_key(addr: SocketAddr) -> [u8; 16] {
+    match addr.ip() {
+        IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+        IpAddr::V6(v6) => v6.octets(),
     }
 }
 
@@ -181,7 +197,7 @@ fn accept_all(
 ) {
     loop {
         match listener.accept() {
-            Ok((mut socket, _addr)) => {
+            Ok((mut socket, peer_addr)) => {
                 if conns.len() >= options.max_connections {
                     // Over capacity: drop the socket, closing it.
                     continue;
@@ -197,7 +213,13 @@ fn accept_all(
                 {
                     conns.insert(
                         token,
-                        Conn::new(socket, token, options.security_headers, options.max_body),
+                        Conn::new(
+                            socket,
+                            token,
+                            options.security_headers,
+                            options.max_body,
+                            ip_key(peer_addr),
+                        ),
                     );
                 }
             }

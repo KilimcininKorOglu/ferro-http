@@ -17,6 +17,7 @@ impl StatusCode {
     pub const PAYLOAD_TOO_LARGE: StatusCode = StatusCode(413);
     pub const URI_TOO_LONG: StatusCode = StatusCode(414);
     pub const IM_A_TEAPOT: StatusCode = StatusCode(418);
+    pub const TOO_MANY_REQUESTS: StatusCode = StatusCode(429);
     pub const INTERNAL_SERVER_ERROR: StatusCode = StatusCode(500);
     pub const NOT_IMPLEMENTED: StatusCode = StatusCode(501);
     pub const HTTP_VERSION_NOT_SUPPORTED: StatusCode = StatusCode(505);
@@ -44,6 +45,7 @@ impl StatusCode {
             413 => "Payload Too Large",
             414 => "URI Too Long",
             418 => "I'm a teapot",
+            429 => "Too Many Requests",
             500 => "Internal Server Error",
             501 => "Not Implemented",
             505 => "HTTP Version Not Supported",

@@ -11,7 +11,7 @@ use crate::http::method::Method;
 use crate::http::request::Request;
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
-use crate::service::Service;
+use crate::service::{RequestContext, Service};
 
 /// Path parameters captured from `:name` segments during matching.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -86,7 +86,7 @@ impl Service for Router {
     /// Dispatches to a matching route, or returns 404 when none matches. A
     /// profile that also serves static files composes its own [`Service`] that
     /// falls through to the filesystem before this 404.
-    fn handle(&self, request: &Request) -> Response {
+    fn handle(&self, request: &Request, _ctx: &RequestContext) -> Response {
         self.dispatch(request)
             .unwrap_or_else(|| Response::text(StatusCode::NOT_FOUND, "404 Not Found"))
     }

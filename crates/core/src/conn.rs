@@ -12,7 +12,7 @@ use crate::http::date::http_date;
 use crate::http::request::{parse_with, ParseError, Parsed, MAX_BODY_BYTES};
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
-use crate::service::Service;
+use crate::service::{RequestContext, Service};
 
 /// The result of advancing a connection by one step.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,6 +36,7 @@ pub struct Connection {
     buf: Vec<u8>,
     policy: ResponsePolicy,
     max_body: usize,
+    peer: [u8; 16],
 }
 
 impl Default for Connection {
@@ -51,6 +52,7 @@ impl Connection {
             buf: Vec::new(),
             policy: ResponsePolicy::default(),
             max_body: MAX_BODY_BYTES,
+            peer: [0u8; 16],
         }
     }
 
@@ -60,12 +62,19 @@ impl Connection {
             buf: Vec::new(),
             policy,
             max_body: MAX_BODY_BYTES,
+            peer: [0u8; 16],
         }
     }
 
     /// Sets the maximum request body size (bytes) accepted on this connection.
     pub fn max_body(mut self, max_body: usize) -> Connection {
         self.max_body = max_body;
+        self
+    }
+
+    /// Sets the peer IP (16 bytes, IPv4 IPv6-mapped) for rate limiting and logs.
+    pub fn peer(mut self, peer: [u8; 16]) -> Connection {
+        self.peer = peer;
         self
     }
 
@@ -81,14 +90,22 @@ impl Connection {
     /// yields an error response and closes the connection.
     pub fn step<S: Service>(&mut self, service: &S, now_unix_secs: u64) -> Step {
         let policy = self.policy;
+        let ctx = RequestContext {
+            peer: self.peer,
+            now_unix_secs,
+        };
         match parse_with(&self.buf, self.max_body) {
             Ok(Parsed::Partial) => Step::NeedMore,
             Ok(Parsed::Complete { request, consumed }) => {
                 self.buf.drain(..consumed);
                 let keep_alive = request.keep_alive();
                 let head_only = request.method.is_head();
-                let response =
-                    finalize(service.handle(&request), now_unix_secs, keep_alive, &policy);
+                let response = finalize(
+                    service.handle(&request, &ctx),
+                    now_unix_secs,
+                    keep_alive,
+                    &policy,
+                );
                 Step::Write {
                     bytes: response.serialize(head_only),
                     close: !keep_alive,
