@@ -56,6 +56,7 @@ fn main() {
         max_connections: config.server.max_connections,
         security_headers: config.security.enable_security_headers,
         max_body: config.server.request_max_bytes,
+        worker_threads: config.server.worker_threads,
     };
 
     eprintln!(

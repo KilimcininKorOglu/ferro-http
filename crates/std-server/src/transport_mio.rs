@@ -24,15 +24,18 @@ const LISTENER: Token = Token(0);
 const READ_CHUNK: usize = 16 * 1024;
 
 /// Runtime tuning derived from configuration.
+#[derive(Clone, Copy)]
 pub struct Options {
     /// How long an idle connection may live before being closed.
     pub idle_timeout: Duration,
-    /// Maximum number of simultaneous connections.
+    /// Maximum number of simultaneous connections (per reactor after fan-out).
     pub max_connections: usize,
     /// Whether responses receive the standard security headers.
     pub security_headers: bool,
     /// Maximum accepted request body size, in bytes.
     pub max_body: usize,
+    /// Reactor thread count; `0` means "derive from available parallelism".
+    pub worker_threads: usize,
 }
 
 struct Conn {
@@ -59,12 +62,83 @@ impl Conn {
     }
 }
 
-/// Runs the event loop, serving requests through `service`. Never returns
-/// except on a fatal poll error.
-pub fn serve<S: Service>(addr: SocketAddr, service: &S, options: &Options) -> io::Result<()> {
+/// Serves requests through `service`, fanned out across reactor threads.
+///
+/// On Unix each reactor owns a `SO_REUSEPORT` listener on the same address and
+/// the kernel load-balances accepts across them; elsewhere a single reactor is
+/// used. `service` is shared by reference across scoped threads, so it must be
+/// `Sync`. Never returns except on a fatal error from a reactor.
+pub fn serve<S: Service + Sync>(
+    addr: SocketAddr,
+    service: &S,
+    options: &Options,
+) -> io::Result<()> {
+    let workers = worker_count(options.worker_threads);
+    // Each reactor enforces the connection cap independently; divide so the
+    // configured total is preserved rather than multiplied by the worker count.
+    let per_worker = Options {
+        max_connections: (options.max_connections / workers).max(1),
+        ..*options
+    };
+
+    if workers <= 1 {
+        return run_reactor(addr, service, &per_worker);
+    }
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| scope.spawn(move || run_reactor(addr, service, &per_worker)))
+            .collect();
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => result?,
+                Err(_) => return Err(io::Error::other("reactor thread panicked")),
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Resolves the reactor count: the configured value, or available parallelism
+/// when `0`. Always at least 1; forced to 1 without `SO_REUSEPORT`.
+fn worker_count(configured: usize) -> usize {
+    #[cfg(not(unix))]
+    {
+        let _ = configured;
+        1
+    }
+    #[cfg(unix)]
+    {
+        if configured > 0 {
+            configured
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        }
+    }
+}
+
+/// Builds a non-blocking listener with address/port reuse, ready for mio.
+fn build_listener(addr: SocketAddr) -> io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    let listener: std::net::TcpListener = socket.into();
+    listener.set_nonblocking(true)?;
+    Ok(TcpListener::from_std(listener))
+}
+
+/// Runs one reactor with its own poll, listener, and connection set. Never
+/// returns except on a fatal poll error.
+fn run_reactor<S: Service>(addr: SocketAddr, service: &S, options: &Options) -> io::Result<()> {
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(1024);
-    let mut listener = TcpListener::bind(addr)?;
+    let mut listener = build_listener(addr)?;
     poll.registry()
         .register(&mut listener, LISTENER, Interest::READABLE)?;
 
