@@ -1,0 +1,12 @@
+name: ferro
+
+services:
+  ferro:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ferro:latest
+    container_name: ferro
+    ports:
+      - "8180:8080"
+    restart: unless-stopped
