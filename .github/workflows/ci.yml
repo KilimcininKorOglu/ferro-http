@@ -25,8 +25,23 @@ jobs:
       - run: cargo build --workspace --verbose
       - run: cargo test --workspace --verbose
 
+  features:
+    name: optional features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # The default workspace gate never compiles feature-gated code, so a
+      # regression in tls/gzip/webui would otherwise pass CI silently.
+      - run: cargo clippy -p ferro --all-targets --features gzip -- -D warnings
+      - run: cargo clippy -p ferro --all-targets --features tls -- -D warnings
+      - run: cargo clippy -p ferro --all-targets --features webui -- -D warnings
+      - run: cargo test -p ferro --features "gzip,tls,webui" --verbose
+
   no_std:
-    name: no_std core build
+    name: no_std cross-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,3 +49,10 @@ jobs:
         with:
           targets: thumbv7em-none-eabi
       - run: cargo build -p ferro-core --target thumbv7em-none-eabi --verbose
+      - run: cargo build -p ferro-embedded --target thumbv7em-none-eabi --verbose
+      # The bare-metal firmware is excluded from the workspace; build it
+      # standalone so it cannot rot silently. Its .cargo/config.toml sets the
+      # thumbv7em target and linker args, so it must run from the crate dir.
+      - name: build bare-metal firmware (standalone)
+        run: cargo build --verbose
+        working-directory: crates/embedded-server
