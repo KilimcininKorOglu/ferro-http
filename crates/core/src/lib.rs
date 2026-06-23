@@ -14,8 +14,10 @@
 
 extern crate alloc;
 
+pub mod config;
 pub mod conn;
 pub mod http;
+pub mod json;
 pub mod router;
 
 /// Crate version, surfaced so profile binaries can report a build identity.
