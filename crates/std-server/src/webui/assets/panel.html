@@ -11,6 +11,9 @@
   header { padding:18px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
   header h1 { font-size:18px; margin:0; font-weight:600; }
   header .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); }
+  .langs { margin-left:auto; display:flex; gap:6px; }
+  .langs button { background:transparent; border:1px solid var(--border); color:var(--muted); padding:4px 10px; border-radius:6px; font-size:13px; cursor:pointer; }
+  .langs button.active { color:#fff; border-color:var(--accent); }
   main { max-width:880px; margin:0 auto; padding:20px; display:grid; gap:20px; grid-template-columns:1fr; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px; }
   .card h2 { margin:0 0 14px; font-size:15px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
@@ -30,32 +33,56 @@
 </style>
 </head>
 <body>
-<header><span class="dot"></span><h1>ferro admin</h1></header>
+<header>
+  <span class="dot"></span><h1 data-i18n="app.title">ferro admin</h1>
+  <div class="langs">
+    <button data-lang="en" onclick="setLang('en')">EN</button>
+    <button data-lang="tr" onclick="setLang('tr')">TR</button>
+  </div>
+</header>
 <main>
   <section class="card">
-    <h2>Statistics</h2>
+    <h2 data-i18n="stats.title">Statistics</h2>
     <div class="grid" id="stats">
-      <div class="stat"><div class="v" id="s-up">-</div><div class="k">uptime (s)</div></div>
-      <div class="stat"><div class="v" id="s-total">-</div><div class="k">requests</div></div>
-      <div class="stat"><div class="v" id="s-2xx">-</div><div class="k">2xx</div></div>
-      <div class="stat"><div class="v" id="s-3xx">-</div><div class="k">3xx</div></div>
-      <div class="stat"><div class="v" id="s-4xx">-</div><div class="k">4xx</div></div>
-      <div class="stat"><div class="v" id="s-5xx">-</div><div class="k">5xx</div></div>
-      <div class="stat"><div class="v" id="s-bytes">-</div><div class="k">bytes out</div></div>
+      <div class="stat"><div class="v" id="s-up">-</div><div class="k" data-i18n="stats.uptime">uptime (s)</div></div>
+      <div class="stat"><div class="v" id="s-total">-</div><div class="k" data-i18n="stats.requests">requests</div></div>
+      <div class="stat"><div class="v" id="s-2xx">-</div><div class="k" data-i18n="stats.2xx">2xx</div></div>
+      <div class="stat"><div class="v" id="s-3xx">-</div><div class="k" data-i18n="stats.3xx">3xx</div></div>
+      <div class="stat"><div class="v" id="s-4xx">-</div><div class="k" data-i18n="stats.4xx">4xx</div></div>
+      <div class="stat"><div class="v" id="s-5xx">-</div><div class="k" data-i18n="stats.5xx">5xx</div></div>
+      <div class="stat"><div class="v" id="s-bytes">-</div><div class="k" data-i18n="stats.bytes">bytes out</div></div>
     </div>
   </section>
   <section class="card">
-    <h2>Configuration</h2>
+    <h2 data-i18n="config.title">Configuration</h2>
     <textarea id="cfg" spellcheck="false" autocomplete="off"></textarea>
     <div class="row">
-      <button id="save">Save &amp; apply</button>
-      <button id="reload" class="secondary">Reload from server</button>
+      <button id="save" data-i18n="config.save">Save &amp; apply</button>
+      <button id="reload" class="secondary" data-i18n="config.reload">Reload from server</button>
       <span id="msg"></span>
     </div>
   </section>
 </main>
 <script>
   var $ = function (id) { return document.getElementById(id); };
+  var I18N = {};
+  var lang = localStorage.getItem('lang') || (navigator.language && navigator.language.slice(0, 2) === 'tr' ? 'tr' : 'en');
+
+  function t(key) { var d = I18N[lang] || {}; return d[key] || key; }
+  function applyI18n() {
+    var nodes = document.querySelectorAll('[data-i18n]');
+    for (var i = 0; i < nodes.length; i++) { nodes[i].textContent = t(nodes[i].getAttribute('data-i18n')); }
+    document.documentElement.lang = lang;
+    document.title = t('app.title');
+    var langs = document.querySelectorAll('[data-lang]');
+    for (var j = 0; j < langs.length; j++) { langs[j].classList.toggle('active', langs[j].getAttribute('data-lang') === lang); }
+  }
+  function setLang(l) { lang = l; localStorage.setItem('lang', l); applyI18n(); }
+  function loadI18n() {
+    return fetch('/admin/api/i18n').then(function (r) { return r.json(); })
+      .then(function (d) { I18N = d; applyI18n(); }).catch(function () {});
+  }
+
   function setMsg(text, ok) { var m = $('msg'); m.textContent = text; m.className = ok ? 'ok' : 'err'; }
 
   function loadStats() {
@@ -71,29 +98,29 @@
   }
 
   function loadConfig() {
-    fetch('/admin/api/config').then(function (r) { return r.text(); }).then(function (t) {
-      $('cfg').value = t;
-      setMsg('Loaded current configuration.', true);
-    }).catch(function () { setMsg('Failed to load configuration.', false); });
+    fetch('/admin/api/config').then(function (r) { return r.text(); }).then(function (txt) {
+      $('cfg').value = txt;
+      setMsg(t('config.loaded'), true);
+    }).catch(function () { setMsg(t('config.load_failed'), false); });
   }
 
   function saveConfig() {
     fetch('/admin/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: $('cfg').value })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
       .then(function (res) {
-        if (!res.ok) { setMsg('Error: ' + (res.body.error || 'rejected'), false); return; }
-        var note = 'Applied.';
+        if (!res.ok) { setMsg(t('config.error') + ' ' + (res.body.error || ''), false); return; }
+        var note = t('config.applied');
         if (res.body.restart_required && res.body.restart_required.length) {
-          note += ' Restart required for: ' + res.body.restart_required.join(', ') + '.';
+          note += ' ' + t('config.restart_required') + ' ' + res.body.restart_required.join(', ');
         }
         setMsg(note, true);
       })
-      .catch(function () { setMsg('Request failed.', false); });
+      .catch(function () { setMsg(t('config.request_failed'), false); });
   }
 
   $('save').addEventListener('click', saveConfig);
   $('reload').addEventListener('click', loadConfig);
-  loadConfig();
+  loadI18n().then(function () { loadConfig(); });
   loadStats();
   setInterval(loadStats, 3000);
 </script>

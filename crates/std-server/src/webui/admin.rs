@@ -21,6 +21,10 @@ use crate::webui::stats::Stats;
 /// The embedded admin panel, with no external resources.
 const PANEL_HTML: &str = include_str!("assets/panel.html");
 
+/// Embedded UI translations, served to the panel as one JSON object.
+const I18N_EN: &str = include_str!("assets/i18n/en.json");
+const I18N_TR: &str = include_str!("assets/i18n/tr.json");
+
 /// Rebuilds the live [`App`] from a configuration. Supplied by the binary so the
 /// admin module stays unaware of route registration.
 type AppBuilder = Box<dyn Fn(&Config) -> App + Send + Sync>;
@@ -73,6 +77,10 @@ impl WebAdmin {
                 let uptime = self.start.elapsed().as_secs();
                 Response::json(StatusCode::OK, &self.stats.snapshot_json(uptime))
             }
+            (Method::Get, "/admin/api/i18n") => Response::json(
+                StatusCode::OK,
+                &format!("{{\"en\":{},\"tr\":{}}}", I18N_EN.trim(), I18N_TR.trim()),
+            ),
             _ => json_error(StatusCode::NOT_FOUND, "no such admin endpoint"),
         }
     }
