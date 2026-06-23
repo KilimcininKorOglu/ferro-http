@@ -14,11 +14,14 @@
 
 extern crate alloc;
 
+pub mod asset;
 pub mod config;
 pub mod conn;
+pub mod handler;
 pub mod http;
 pub mod json;
 pub mod router;
+pub mod service;
 
 /// Crate version, surfaced so profile binaries can report a build identity.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use crate::http::request::{parse, ParseError, Parsed};
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
-use crate::router::Router;
+use crate::service::Service;
 
 /// The result of advancing a connection by one step.
 #[derive(Debug, PartialEq, Eq)]
@@ -40,21 +40,19 @@ impl Connection {
         self.buf.extend_from_slice(data);
     }
 
-    /// Attempts to handle one buffered request, dispatching through `router`.
+    /// Attempts to handle one buffered request, dispatching through `service`.
     ///
     /// Returns [`Step::NeedMore`] when the buffer holds only a partial request,
     /// or [`Step::Write`] with the serialized response otherwise. A parse error
     /// yields an error response and closes the connection.
-    pub fn step(&mut self, router: &Router) -> Step {
+    pub fn step<S: Service>(&mut self, service: &S) -> Step {
         match parse(&self.buf) {
             Ok(Parsed::Partial) => Step::NeedMore,
             Ok(Parsed::Complete { request, consumed }) => {
                 self.buf.drain(..consumed);
                 let keep_alive = request.keep_alive();
                 let head_only = request.method.is_head();
-                let response = router
-                    .dispatch(&request)
-                    .unwrap_or_else(|| Response::text(StatusCode::NOT_FOUND, "404 Not Found"));
+                let response = service.handle(&request);
                 Step::Write {
                     bytes: response.serialize(head_only),
                     close: !keep_alive,
@@ -89,7 +87,7 @@ mod tests {
     use super::*;
     use crate::http::method::Method;
     use crate::http::request::Request;
-    use crate::router::Params;
+    use crate::router::{Params, Router};
     use alloc::string::String;
 
     fn ok_handler(_req: &Request, _p: &Params) -> Response {

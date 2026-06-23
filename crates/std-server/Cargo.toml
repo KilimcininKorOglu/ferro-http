@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 ferro-core = { path = "../core" }
+mio = { version = "1.2.1", features = ["net", "os-poll"] }

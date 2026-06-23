@@ -213,8 +213,15 @@ pub trait ConfigSource {
 pub enum ConfigError {
     Json(JsonError),
     NotAnObject,
-    WrongType { path: String },
-    InvalidValue { path: String, reason: &'static str },
+    WrongType {
+        path: String,
+    },
+    InvalidValue {
+        path: String,
+        reason: &'static str,
+    },
+    /// The config source (e.g. a file) failed to provide bytes.
+    Source(String),
 }
 
 impl ConfigError {
@@ -239,6 +246,7 @@ impl fmt::Display for ConfigError {
             ConfigError::NotAnObject => f.write_str("config root must be a JSON object"),
             ConfigError::WrongType { path } => write!(f, "wrong type for {path}"),
             ConfigError::InvalidValue { path, reason } => write!(f, "invalid {path}: {reason}"),
+            ConfigError::Source(msg) => write!(f, "config source error: {msg}"),
         }
     }
 }
