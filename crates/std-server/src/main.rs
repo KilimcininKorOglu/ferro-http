@@ -8,6 +8,8 @@ mod fs_config;
 mod transport_mio;
 
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ferro_core::config::{Config, ConfigSource};
@@ -68,6 +70,15 @@ fn main() {
         worker_threads: config.server.worker_threads,
     };
 
+    // Flip the shutdown flag on SIGINT/SIGTERM; reactors observe it and drain.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    for &signal in &[signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+        if let Err(e) = signal_hook::flag::register(signal, Arc::clone(&shutdown)) {
+            eprintln!("[ferro] could not install signal handler: {e}");
+            std::process::exit(1);
+        }
+    }
+
     eprintln!(
         "[ferro] {} listening on http://{} (root: {})",
         ferro_core::VERSION,
@@ -75,9 +86,12 @@ fn main() {
         config.static_files.root
     );
 
-    if let Err(e) = transport_mio::serve(addr, &app, &options) {
-        eprintln!("[ferro] fatal: {e}");
-        std::process::exit(1);
+    match transport_mio::serve(addr, &app, &options, &shutdown) {
+        Ok(()) => eprintln!("[ferro] graceful shutdown complete"),
+        Err(e) => {
+            eprintln!("[ferro] fatal: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

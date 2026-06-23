@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use mio::net::{TcpListener, TcpStream};
@@ -22,6 +23,8 @@ use ferro_core::service::Service;
 
 const LISTENER: Token = Token(0);
 const READ_CHUNK: usize = 16 * 1024;
+/// How long, after a shutdown signal, to let in-flight connections finish.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Runtime tuning derived from configuration.
 #[derive(Clone, Copy)]
@@ -88,6 +91,7 @@ pub fn serve<S: Service + Sync>(
     addr: SocketAddr,
     service: &S,
     options: &Options,
+    shutdown: &AtomicBool,
 ) -> io::Result<()> {
     let workers = worker_count(options.worker_threads);
     // Each reactor enforces the connection cap independently; divide so the
@@ -98,12 +102,12 @@ pub fn serve<S: Service + Sync>(
     };
 
     if workers <= 1 {
-        return run_reactor(addr, service, &per_worker);
+        return run_reactor(addr, service, &per_worker, shutdown);
     }
 
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
-            .map(|_| scope.spawn(move || run_reactor(addr, service, &per_worker)))
+            .map(|_| scope.spawn(move || run_reactor(addr, service, &per_worker, shutdown)))
             .collect();
         for handle in handles {
             match handle.join() {
@@ -151,7 +155,12 @@ fn build_listener(addr: SocketAddr) -> io::Result<TcpListener> {
 
 /// Runs one reactor with its own poll, listener, and connection set. Never
 /// returns except on a fatal poll error.
-fn run_reactor<S: Service>(addr: SocketAddr, service: &S, options: &Options) -> io::Result<()> {
+fn run_reactor<S: Service>(
+    addr: SocketAddr,
+    service: &S,
+    options: &Options,
+    shutdown: &AtomicBool,
+) -> io::Result<()> {
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(1024);
     let mut listener = build_listener(addr)?;
@@ -162,28 +171,52 @@ fn run_reactor<S: Service>(addr: SocketAddr, service: &S, options: &Options) -> 
     let mut next_token = 1usize;
     let tick = Duration::from_secs(1);
 
-    loop {
+    // Serve until a shutdown signal arrives (observed within one poll tick).
+    while !shutdown.load(Ordering::Relaxed) {
         poll.poll(&mut events, Some(tick))?;
-
         for event in events.iter() {
             match event.token() {
                 LISTENER => accept_all(&mut poll, &listener, &mut conns, &mut next_token, options),
-                token => {
-                    let drop_conn = match conns.get_mut(&token) {
-                        Some(conn) => {
-                            conn.last_activity = Instant::now();
-                            handle_ready(&poll, conn, event.is_readable(), service)
-                        }
-                        None => false,
-                    };
-                    if drop_conn {
-                        close_conn(&poll, &mut conns, token);
-                    }
-                }
+                token => handle_token(&poll, &mut conns, token, event.is_readable(), service),
             }
         }
-
         sweep_idle(&poll, &mut conns, options.idle_timeout);
+    }
+
+    // Graceful drain: stop accepting and finish in-flight connections up to a
+    // grace deadline, then return so the thread can join.
+    let _ = poll.registry().deregister(&mut listener);
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    while !conns.is_empty() && Instant::now() < deadline {
+        poll.poll(&mut events, Some(tick))?;
+        for event in events.iter() {
+            let token = event.token();
+            if token != LISTENER {
+                handle_token(&poll, &mut conns, token, event.is_readable(), service);
+            }
+        }
+        sweep_idle(&poll, &mut conns, options.idle_timeout);
+    }
+    Ok(())
+}
+
+/// Processes a readiness event for one connection token, dropping it on close.
+fn handle_token<S: Service>(
+    poll: &Poll,
+    conns: &mut HashMap<Token, Conn>,
+    token: Token,
+    readable: bool,
+    service: &S,
+) {
+    let drop_conn = match conns.get_mut(&token) {
+        Some(conn) => {
+            conn.last_activity = Instant::now();
+            handle_ready(poll, conn, readable, service)
+        }
+        None => false,
+    };
+    if drop_conn {
+        close_conn(poll, conns, token);
     }
 }
 
