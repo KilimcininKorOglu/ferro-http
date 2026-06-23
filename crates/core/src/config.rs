@@ -123,6 +123,15 @@ impl Default for LoggingConfig {
     }
 }
 
+/// TLS settings. Effective only in the std profile built with the `tls`
+/// feature; the core merely parses and validates them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TlsConfig {
+    pub enabled: bool,
+    pub cert_path: String,
+    pub key_path: String,
+}
+
 /// The complete server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Config {
@@ -130,6 +139,7 @@ pub struct Config {
     pub static_files: StaticConfig,
     pub compression: CompressionConfig,
     pub security: SecurityConfig,
+    pub tls: TlsConfig,
     pub logging: LoggingConfig,
     /// File-extension to MIME-type overrides, e.g. `.wasm` -> `application/wasm`.
     pub mime_overrides: Vec<(String, String)>,
@@ -170,6 +180,9 @@ impl Config {
         if let Some(s) = root.get("security") {
             read_security(s, &mut cfg.security)?;
         }
+        if let Some(t) = root.get("tls") {
+            read_tls(t, &mut cfg.tls)?;
+        }
         if let Some(l) = root.get("logging") {
             read_string(l, "level", &mut cfg.logging.level, "logging")?;
             read_bool(l, "access_log", &mut cfg.logging.access_log, "logging")?;
@@ -191,6 +204,20 @@ impl Config {
         }
         if self.static_files.root.is_empty() {
             return Err(ConfigError::invalid("static.root", "must not be empty"));
+        }
+        if self.tls.enabled {
+            if self.tls.cert_path.is_empty() {
+                return Err(ConfigError::invalid(
+                    "tls.cert_path",
+                    "required when tls.enabled is true",
+                ));
+            }
+            if self.tls.key_path.is_empty() {
+                return Err(ConfigError::invalid(
+                    "tls.key_path",
+                    "required when tls.enabled is true",
+                ));
+            }
         }
         if !LOG_LEVELS.contains(&self.logging.level.as_str()) {
             return Err(ConfigError::invalid(
@@ -299,6 +326,13 @@ fn read_static(value: &JsonValue, cfg: &mut StaticConfig) -> Result<(), ConfigEr
     if let Some(v) = value.get("index_files") {
         cfg.index_files = read_string_array(v, "static.index_files")?;
     }
+    Ok(())
+}
+
+fn read_tls(value: &JsonValue, tls: &mut TlsConfig) -> Result<(), ConfigError> {
+    read_bool(value, "enabled", &mut tls.enabled, "tls")?;
+    read_string(value, "cert_path", &mut tls.cert_path, "tls")?;
+    read_string(value, "key_path", &mut tls.key_path, "tls")?;
     Ok(())
 }
 
@@ -537,5 +571,33 @@ mod tests {
             Config::from_json_str("[]").unwrap_err(),
             ConfigError::NotAnObject
         );
+    }
+
+    #[test]
+    fn tls_is_disabled_by_default() {
+        let cfg = Config::default();
+        assert!(!cfg.tls.enabled);
+        assert!(cfg.tls.cert_path.is_empty());
+    }
+
+    #[test]
+    fn tls_section_parses() {
+        let cfg = Config::from_json_str(
+            r#"{"tls": {"enabled": true, "cert_path": "/c.pem", "key_path": "/k.pem"}}"#,
+        )
+        .expect("valid tls config");
+        assert!(cfg.tls.enabled);
+        assert_eq!(cfg.tls.cert_path, "/c.pem");
+        assert_eq!(cfg.tls.key_path, "/k.pem");
+    }
+
+    #[test]
+    fn tls_enabled_without_cert_is_rejected() {
+        // Enabling TLS without the cert/key paths must fail loudly, not serve plaintext.
+        let err = Config::from_json_str(r#"{"tls": {"enabled": true}}"#).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { path, .. } if path == "tls.cert_path"
+        ));
     }
 }
