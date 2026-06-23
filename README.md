@@ -7,7 +7,8 @@ logic, with two build-time profiles:
 
 - **std** (default): high-performance event loop, serves from the filesystem.
   Targets Linux, macOS, Windows, Docker, and embedded Linux. Optional, default-off
-  cargo features add gzip compression and TLS termination (rustls).
+  cargo features add gzip compression, TLS termination (rustls), and an embedded
+  web admin panel (`webui`) for live config editing, hot-reload, and stats.
 - **embedded**: `no_std` with smoltcp and compile-time embedded assets and
   config. Targets bare-metal systems.
 
