@@ -15,15 +15,22 @@ pub struct App {
     router: Router,
     assets: FsAssets,
     index_files: Vec<String>,
+    mime_overrides: Vec<(String, String)>,
 }
 
 impl App {
     /// Builds the application from its parts.
-    pub fn new(router: Router, assets: FsAssets, index_files: Vec<String>) -> App {
+    pub fn new(
+        router: Router,
+        assets: FsAssets,
+        index_files: Vec<String>,
+        mime_overrides: Vec<(String, String)>,
+    ) -> App {
         App {
             router,
             assets,
             index_files,
+            mime_overrides,
         }
     }
 }
@@ -36,7 +43,12 @@ impl Service for App {
         }
         // Then static files, for body-bearing read methods (GET and HEAD).
         if matches!(request.method, Method::Get | Method::Head) {
-            if let Some(response) = serve_static(request.path(), &self.index_files, &self.assets) {
+            if let Some(response) = serve_static(
+                request.path(),
+                &self.index_files,
+                &self.assets,
+                &self.mime_overrides,
+            ) {
                 return response;
             }
         }

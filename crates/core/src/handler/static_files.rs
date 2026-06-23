@@ -8,6 +8,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::asset::AssetSource;
+use crate::http::mime::mime_for;
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
 
@@ -22,6 +23,7 @@ pub fn serve_static<A: AssetSource>(
     path: &str,
     index_files: &[String],
     assets: &A,
+    mime_overrides: &[(String, String)],
 ) -> Option<Response> {
     let decoded = percent_decode(path)?;
     let segments = sanitize(&decoded)?;
@@ -39,7 +41,7 @@ pub fn serve_static<A: AssetSource>(
                 c
             };
             if let Some(asset) = assets.load(&candidate) {
-                return Some(file_response(&candidate, asset.bytes));
+                return Some(file_response(&candidate, asset.bytes, mime_overrides));
             }
         }
         None
@@ -47,12 +49,13 @@ pub fn serve_static<A: AssetSource>(
         let rel = segments.join("/");
         assets
             .load(&rel)
-            .map(|asset| file_response(&rel, asset.bytes))
+            .map(|asset| file_response(&rel, asset.bytes, mime_overrides))
     }
 }
 
-fn file_response(name: &str, bytes: Vec<u8>) -> Response {
-    let mut response = Response::new(StatusCode::OK).with_header("Content-Type", guess_mime(name));
+fn file_response(name: &str, bytes: Vec<u8>, mime_overrides: &[(String, String)]) -> Response {
+    let mut response =
+        Response::new(StatusCode::OK).with_header("Content-Type", mime_for(name, mime_overrides));
     response.body = bytes;
     response
 }
@@ -106,27 +109,6 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// A minimal extension-to-MIME guess. The full table plus config overrides
-/// arrive in a later phase.
-fn guess_mime(name: &str) -> &'static str {
-    let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-    match ext {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "json" => "application/json",
-        "txt" => "text/plain; charset=utf-8",
-        "xml" => "application/xml",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "ico" => "image/x-icon",
-        "wasm" => "application/wasm",
-        _ => "application/octet-stream",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,9 +144,14 @@ mod tests {
         Vec::from(["index.html".to_string()])
     }
 
+    fn no_mime() -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     #[test]
     fn serves_a_known_file_with_mime() {
-        let resp = serve_static("/style.css", &indexes(), &assets()).expect("file should serve");
+        let resp = serve_static("/style.css", &indexes(), &assets(), &no_mime())
+            .expect("file should serve");
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(resp.body, b"body{}");
         assert!(resp
@@ -175,38 +162,40 @@ mod tests {
 
     #[test]
     fn root_resolves_index_file() {
-        let resp = serve_static("/", &indexes(), &assets()).expect("index should serve");
+        let resp =
+            serve_static("/", &indexes(), &assets(), &no_mime()).expect("index should serve");
         assert_eq!(resp.body, b"<h1>home</h1>");
     }
 
     #[test]
     fn trailing_slash_resolves_subdir_index() {
-        let resp = serve_static("/dir/", &indexes(), &assets()).expect("dir index should serve");
+        let resp = serve_static("/dir/", &indexes(), &assets(), &no_mime())
+            .expect("dir index should serve");
         assert_eq!(resp.body, b"<h1>dir</h1>");
     }
 
     #[test]
     fn missing_file_is_none() {
-        assert!(serve_static("/nope.txt", &indexes(), &assets()).is_none());
+        assert!(serve_static("/nope.txt", &indexes(), &assets(), &no_mime()).is_none());
     }
 
     #[test]
     fn traversal_is_rejected() {
         // Both raw and percent-encoded ".." must be refused, never served.
-        assert!(serve_static("/../secret", &indexes(), &assets()).is_none());
-        assert!(serve_static("/%2e%2e/secret", &indexes(), &assets()).is_none());
+        assert!(serve_static("/../secret", &indexes(), &assets(), &no_mime()).is_none());
+        assert!(serve_static("/%2e%2e/secret", &indexes(), &assets(), &no_mime()).is_none());
     }
 
     #[test]
     fn percent_encoded_path_is_decoded() {
         // "%2F" decodes to '/', then segments split and resolve normally.
-        let resp = serve_static("/dir%2Findex.html", &indexes(), &assets())
+        let resp = serve_static("/dir%2Findex.html", &indexes(), &assets(), &no_mime())
             .expect("decoded path should serve");
         assert_eq!(resp.body, b"<h1>dir</h1>");
     }
 
     #[test]
     fn malformed_percent_escape_is_rejected() {
-        assert!(serve_static("/style%2", &indexes(), &assets()).is_none());
+        assert!(serve_static("/style%2", &indexes(), &assets(), &no_mime()).is_none());
     }
 }

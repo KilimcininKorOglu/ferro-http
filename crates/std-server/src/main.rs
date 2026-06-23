@@ -48,6 +48,7 @@ fn main() {
         router,
         FsAssets::new(&config.static_files.root),
         config.static_files.index_files.clone(),
+        config.mime_overrides.clone(),
     );
 
     let options = Options {
