@@ -57,7 +57,10 @@ fn main() {
 
     let app = App::new(
         router,
-        FsAssets::new(&config.static_files.root),
+        FsAssets::new(
+            &config.static_files.root,
+            config.static_files.follow_symlinks,
+        ),
         config.static_files.index_files.clone(),
         config.mime_overrides.clone(),
         rate_limiter,
