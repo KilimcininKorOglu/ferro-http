@@ -26,6 +26,14 @@ const READ_CHUNK: usize = 16 * 1024;
 /// How long, after a shutdown signal, to let in-flight connections finish.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
+/// Shared TLS configuration threaded to each reactor. With the `tls` feature it
+/// is an optional `rustls::ServerConfig` shared across reactors; without it, a
+/// zero-sized placeholder so the transport keeps one signature and code path.
+#[cfg(feature = "tls")]
+pub type SharedTls = Option<std::sync::Arc<rustls::ServerConfig>>;
+#[cfg(not(feature = "tls"))]
+pub type SharedTls = ();
+
 /// Runtime tuning derived from configuration.
 #[derive(Clone, Copy)]
 pub struct Options {
@@ -49,6 +57,9 @@ struct Conn {
     wants_write: bool,
     close_after_flush: bool,
     last_activity: Instant,
+    /// Per-connection TLS session; `None` for plaintext connections.
+    #[cfg(feature = "tls")]
+    tls: Option<Box<rustls::ServerConnection>>,
 }
 
 impl Conn {
@@ -69,6 +80,56 @@ impl Conn {
             wants_write: false,
             close_after_flush: false,
             last_activity: Instant::now(),
+            #[cfg(feature = "tls")]
+            tls: None,
+        }
+    }
+
+    /// Reads available transport bytes and feeds decrypted plaintext to the core
+    /// state machine. Returns true if the peer closed or a fatal error occurred.
+    fn read_in(&mut self) -> bool {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.tls.as_mut() {
+            return tls_read_in(&mut self.socket, tls, &mut self.state);
+        }
+        plain_read_in(&mut self.socket, &mut self.state)
+    }
+
+    /// Hands queued plaintext output to the transport. For TLS this encrypts it
+    /// into the session's send buffer; for plaintext it stays in `out` as-is.
+    fn queue_out(&mut self) {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.tls.as_mut() {
+            tls_queue_out(tls, &mut self.out);
+        }
+    }
+
+    /// Writes pending transport bytes to the socket. Returns true on a fatal
+    /// write error.
+    fn write_out(&mut self) -> bool {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.tls.as_mut() {
+            return tls_write_out(&mut self.socket, tls);
+        }
+        plain_write_out(&mut self.socket, &mut self.out)
+    }
+
+    /// Whether the transport still has bytes waiting to be written to the socket.
+    fn pending_write(&self) -> bool {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.tls.as_ref() {
+            return tls.wants_write();
+        }
+        !self.out.is_empty()
+    }
+
+    /// Begins a clean shutdown. For TLS this queues a `close_notify` alert so the
+    /// peer sees an orderly close rather than a truncated stream. Called once,
+    /// when the response asks to close.
+    fn begin_close(&mut self) {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.tls.as_mut() {
+            tls.send_close_notify();
         }
     }
 }
@@ -91,6 +152,7 @@ pub fn serve<S: Service + Sync>(
     addr: SocketAddr,
     service: &S,
     options: &Options,
+    tls: &SharedTls,
     shutdown: &AtomicBool,
 ) -> io::Result<()> {
     let workers = worker_count(options.worker_threads);
@@ -102,12 +164,12 @@ pub fn serve<S: Service + Sync>(
     };
 
     if workers <= 1 {
-        return run_reactor(addr, service, &per_worker, shutdown);
+        return run_reactor(addr, service, &per_worker, tls, shutdown);
     }
 
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
-            .map(|_| scope.spawn(move || run_reactor(addr, service, &per_worker, shutdown)))
+            .map(|_| scope.spawn(move || run_reactor(addr, service, &per_worker, tls, shutdown)))
             .collect();
         for handle in handles {
             match handle.join() {
@@ -159,6 +221,7 @@ fn run_reactor<S: Service>(
     addr: SocketAddr,
     service: &S,
     options: &Options,
+    tls: &SharedTls,
     shutdown: &AtomicBool,
 ) -> io::Result<()> {
     let mut poll = Poll::new()?;
@@ -176,7 +239,14 @@ fn run_reactor<S: Service>(
         poll.poll(&mut events, Some(tick))?;
         for event in events.iter() {
             match event.token() {
-                LISTENER => accept_all(&mut poll, &listener, &mut conns, &mut next_token, options),
+                LISTENER => accept_all(
+                    &mut poll,
+                    &listener,
+                    &mut conns,
+                    &mut next_token,
+                    options,
+                    tls,
+                ),
                 token => handle_token(&poll, &mut conns, token, event.is_readable(), service),
             }
         }
@@ -221,12 +291,14 @@ fn handle_token<S: Service>(
 }
 
 /// Accepts every pending connection until the listener would block.
+#[cfg_attr(not(feature = "tls"), allow(unused_variables))]
 fn accept_all(
     poll: &mut Poll,
     listener: &TcpListener,
     conns: &mut HashMap<Token, Conn>,
     next_token: &mut usize,
     options: &Options,
+    tls: &SharedTls,
 ) {
     loop {
         match listener.accept() {
@@ -242,19 +314,30 @@ fn accept_all(
                 if poll
                     .registry()
                     .register(&mut socket, token, Interest::READABLE)
-                    .is_ok()
+                    .is_err()
                 {
-                    conns.insert(
-                        token,
-                        Conn::new(
-                            socket,
-                            token,
-                            options.security_headers,
-                            options.max_body,
-                            ip_key(peer_addr),
-                        ),
-                    );
+                    continue;
                 }
+                // `mut` is used only when the tls feature wraps the connection.
+                #[cfg_attr(not(feature = "tls"), allow(unused_mut))]
+                let mut conn = Conn::new(
+                    socket,
+                    token,
+                    options.security_headers,
+                    options.max_body,
+                    ip_key(peer_addr),
+                );
+                #[cfg(feature = "tls")]
+                if let Some(config) = tls.as_ref() {
+                    match rustls::ServerConnection::new(config.clone()) {
+                        Ok(session) => conn.tls = Some(Box::new(session)),
+                        Err(_) => {
+                            let _ = poll.registry().deregister(&mut conn.socket);
+                            continue;
+                        }
+                    }
+                }
+                conns.insert(token, conn);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -267,15 +350,8 @@ fn accept_all(
 /// dropped (peer closed, error, or a completed close-after-flush).
 fn handle_ready<S: Service>(poll: &Poll, conn: &mut Conn, readable: bool, service: &S) -> bool {
     if readable && !conn.close_after_flush {
-        let mut buf = [0u8; READ_CHUNK];
-        loop {
-            match conn.socket.read(&mut buf) {
-                Ok(0) => return true, // peer closed
-                Ok(n) => conn.state.feed(&buf[..n]),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return true,
-            }
+        if conn.read_in() {
+            return true; // peer closed or a fatal transport error
         }
 
         // Drive the state machine over everything buffered (handles pipelining).
@@ -292,23 +368,105 @@ fn handle_ready<S: Service>(poll: &Poll, conn: &mut Conn, readable: bool, servic
                 }
             }
         }
+        // Encrypt the response first, then queue close_notify after it: rustls
+        // drops application data written once close_notify has been sent.
+        conn.queue_out();
+        if conn.close_after_flush {
+            conn.begin_close();
+        }
     }
 
-    if flush(conn) {
+    if conn.write_out() {
         return true;
     }
     update_interest(poll, conn)
 }
 
-/// Writes pending bytes until the socket would block or the buffer drains.
-/// Returns true on a fatal write error.
-fn flush(conn: &mut Conn) -> bool {
-    while !conn.out.is_empty() {
-        match conn.socket.write(&conn.out) {
+/// Plaintext read: pulls socket bytes straight into the core state machine.
+/// Returns true if the peer closed or a fatal error occurred.
+fn plain_read_in(socket: &mut TcpStream, state: &mut Connection) -> bool {
+    let mut buf = [0u8; READ_CHUNK];
+    loop {
+        match socket.read(&mut buf) {
+            Ok(0) => return true, // peer closed
+            Ok(n) => state.feed(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+/// Plaintext write: writes `out` straight to the socket until it would block or
+/// drains. Returns true on a fatal write error.
+fn plain_write_out(socket: &mut TcpStream, out: &mut Vec<u8>) -> bool {
+    while !out.is_empty() {
+        match socket.write(out) {
             Ok(0) => return true,
             Ok(n) => {
-                conn.out.drain(..n);
+                out.drain(..n);
             }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+/// TLS read: pumps ciphertext from the socket through rustls (advancing the
+/// handshake or decrypting data) and feeds any plaintext to the state machine.
+/// Returns true if the peer closed or a TLS error occurred.
+#[cfg(feature = "tls")]
+fn tls_read_in(
+    socket: &mut TcpStream,
+    tls: &mut rustls::ServerConnection,
+    state: &mut Connection,
+) -> bool {
+    loop {
+        match tls.read_tls(socket) {
+            Ok(0) => return true, // peer closed the TCP connection
+            Ok(_) => {
+                if tls.process_new_packets().is_err() {
+                    return true; // TLS protocol error; drop the connection
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return true,
+        }
+    }
+    // Drain any decrypted plaintext now available into the state machine.
+    let mut buf = [0u8; READ_CHUNK];
+    loop {
+        match tls.reader().read(&mut buf) {
+            Ok(0) => break, // no more plaintext buffered (or clean TLS EOF)
+            Ok(n) => state.feed(&buf[..n]),
+            Err(_) => break, // WouldBlock or transient: nothing more to drain now
+        }
+    }
+    false
+}
+
+/// Encrypts queued plaintext into the TLS session's outgoing buffer.
+#[cfg(feature = "tls")]
+fn tls_queue_out(tls: &mut rustls::ServerConnection, out: &mut Vec<u8>) {
+    if !out.is_empty() {
+        // rustls' writer buffers all bytes, so a short write cannot occur.
+        let _ = tls.writer().write_all(out);
+        out.clear();
+    }
+}
+
+/// TLS write: drains the session's outgoing ciphertext to the socket. Returns
+/// true on a fatal write error.
+#[cfg(feature = "tls")]
+fn tls_write_out(socket: &mut TcpStream, tls: &mut rustls::ServerConnection) -> bool {
+    while tls.wants_write() {
+        match tls.write_tls(socket) {
+            Ok(0) => return true,
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return true,
@@ -319,7 +477,7 @@ fn flush(conn: &mut Conn) -> bool {
 
 /// Reregisters interest after I/O, and reports whether the connection is done.
 fn update_interest(poll: &Poll, conn: &mut Conn) -> bool {
-    if conn.out.is_empty() {
+    if !conn.pending_write() {
         if conn.close_after_flush {
             return true; // fully flushed and asked to close
         }

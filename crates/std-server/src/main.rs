@@ -5,6 +5,8 @@
 mod app;
 mod fs_assets;
 mod fs_config;
+#[cfg(feature = "tls")]
+mod tls;
 mod transport_mio;
 
 use std::net::SocketAddr;
@@ -80,14 +82,36 @@ fn main() {
         }
     }
 
+    // Build the optional TLS config; an enabled-but-broken cert is fatal.
+    #[cfg(feature = "tls")]
+    let tls: transport_mio::SharedTls = if config.tls.enabled {
+        match tls::server_config(&config.tls.cert_path, &config.tls.key_path) {
+            Ok(server_config) => Some(server_config),
+            Err(e) => {
+                eprintln!("[ferro] tls error: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "tls"))]
+    let tls: transport_mio::SharedTls = ();
+
+    #[cfg(feature = "tls")]
+    let scheme = if config.tls.enabled { "https" } else { "http" };
+    #[cfg(not(feature = "tls"))]
+    let scheme = "http";
+
     eprintln!(
-        "[ferro] {} listening on http://{} (root: {})",
+        "[ferro] {} listening on {}://{} (root: {})",
         ferro_core::VERSION,
+        scheme,
         addr,
         config.static_files.root
     );
 
-    match transport_mio::serve(addr, &app, &options, &shutdown) {
+    match transport_mio::serve(addr, &app, &options, &tls, &shutdown) {
         Ok(()) => eprintln!("[ferro] graceful shutdown complete"),
         Err(e) => {
             eprintln!("[ferro] fatal: {e}");
