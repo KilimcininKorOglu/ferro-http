@@ -1,11 +1,13 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/std-server", "crates/embedded"]
+# The bare-metal `embedded-server` binary (panic handler, allocator, `#[entry]`)
+# cannot link for the host target, so it is excluded from the workspace and built
+# standalone for thumbv7em via its own `.cargo/config.toml`.
+exclude = ["crates/embedded-server"]
 
 # `crates/embedded` (ferro-embedded) holds the no_std smoltcp transport and is a
 # host-buildable library, so its loopback transport test runs under `cargo test`.
-# The bare-metal `embedded-server` binary (panic handler, allocator, entry point)
-# is excluded from the workspace because it cannot link for the host target.
 
 [workspace.package]
 version = "0.0.1"

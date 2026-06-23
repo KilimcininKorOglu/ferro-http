@@ -1,0 +1,24 @@
+[package]
+name = "embedded-server"
+description = "Bare-metal no_std ferro web server for Cortex-M, served over smoltcp"
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "embedded-server"
+path = "src/main.rs"
+
+[dependencies]
+ferro-core = { path = "../core" }
+ferro-embedded = { path = "../embedded" }
+smoltcp = { version = "0.11.0", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+embedded-alloc = "0.7"
+panic-halt = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

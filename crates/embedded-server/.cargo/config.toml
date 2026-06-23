@@ -1,0 +1,7 @@
+# Build this crate for the bare-metal Cortex-M4F target by default, and link with
+# cortex-m-rt's linker script (`link.x`, which pulls in the local `memory.x`).
+[build]
+target = "thumbv7em-none-eabi"
+
+[target.thumbv7em-none-eabi]
+rustflags = ["-C", "link-arg=-Tlink.x"]

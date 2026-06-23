@@ -1,0 +1,4 @@
+{
+  "server": { "port": 80 },
+  "static": { "index_files": ["index.html"] }
+}
