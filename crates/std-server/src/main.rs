@@ -8,6 +8,8 @@ mod fs_config;
 #[cfg(feature = "tls")]
 mod tls;
 mod transport_mio;
+#[cfg(feature = "webui")]
+mod webui;
 
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;

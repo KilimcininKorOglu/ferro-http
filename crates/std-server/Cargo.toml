@@ -15,6 +15,8 @@ path = "src/main.rs"
 gzip = ["ferro-core/gzip"]
 # Optional TLS termination via rustls (off by default; grows the dep tree).
 tls = ["dep:rustls", "dep:rustls-pemfile"]
+# Optional embedded web admin panel (off by default; no extra dependencies).
+webui = []
 
 [dependencies]
 ferro-core = { path = "../core" }
