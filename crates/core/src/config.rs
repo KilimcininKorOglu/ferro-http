@@ -132,6 +132,15 @@ pub struct TlsConfig {
     pub key_path: String,
 }
 
+/// Admin panel credentials. Effective only in the std profile built with the
+/// `webui` feature. The password is stored as a lowercase hex SHA-256 digest,
+/// never in plaintext.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdminConfig {
+    pub username: String,
+    pub password_sha256: String,
+}
+
 /// The complete server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Config {
@@ -140,6 +149,7 @@ pub struct Config {
     pub compression: CompressionConfig,
     pub security: SecurityConfig,
     pub tls: TlsConfig,
+    pub admin: AdminConfig,
     pub logging: LoggingConfig,
     /// File-extension to MIME-type overrides, e.g. `.wasm` -> `application/wasm`.
     pub mime_overrides: Vec<(String, String)>,
@@ -182,6 +192,9 @@ impl Config {
         }
         if let Some(t) = root.get("tls") {
             read_tls(t, &mut cfg.tls)?;
+        }
+        if let Some(a) = root.get("admin") {
+            read_admin(a, &mut cfg.admin)?;
         }
         if let Some(l) = root.get("logging") {
             read_string(l, "level", &mut cfg.logging.level, "logging")?;
@@ -297,6 +310,17 @@ impl Config {
         out.push_str(&format!(
             "    \"key_path\": \"{}\"\n",
             escape_json(&self.tls.key_path)
+        ));
+        out.push_str("  },\n");
+
+        out.push_str("  \"admin\": {\n");
+        out.push_str(&format!(
+            "    \"username\": \"{}\",\n",
+            escape_json(&self.admin.username)
+        ));
+        out.push_str(&format!(
+            "    \"password_sha256\": \"{}\"\n",
+            escape_json(&self.admin.password_sha256)
         ));
         out.push_str("  },\n");
 
@@ -457,6 +481,17 @@ fn read_tls(value: &JsonValue, tls: &mut TlsConfig) -> Result<(), ConfigError> {
     read_bool(value, "enabled", &mut tls.enabled, "tls")?;
     read_string(value, "cert_path", &mut tls.cert_path, "tls")?;
     read_string(value, "key_path", &mut tls.key_path, "tls")?;
+    Ok(())
+}
+
+fn read_admin(value: &JsonValue, admin: &mut AdminConfig) -> Result<(), ConfigError> {
+    read_string(value, "username", &mut admin.username, "admin")?;
+    read_string(
+        value,
+        "password_sha256",
+        &mut admin.password_sha256,
+        "admin",
+    )?;
     Ok(())
 }
 
@@ -778,6 +813,16 @@ mod tests {
     }
 
     #[test]
+    fn admin_section_parses() {
+        let cfg = Config::from_json_str(
+            r#"{"admin": {"username": "root", "password_sha256": "abc123"}}"#,
+        )
+        .expect("valid admin config");
+        assert_eq!(cfg.admin.username, "root");
+        assert_eq!(cfg.admin.password_sha256, "abc123");
+    }
+
+    #[test]
     fn default_config_round_trips_through_json() {
         let cfg = Config::default();
         let parsed = Config::from_json_str(&cfg.to_json_string()).expect("parse default");
@@ -800,6 +845,8 @@ mod tests {
         cfg.tls.enabled = true;
         cfg.tls.cert_path = "/c.pem".to_string();
         cfg.tls.key_path = "/k.pem".to_string();
+        cfg.admin.username = "admin".to_string();
+        cfg.admin.password_sha256 = "deadbeef".to_string();
         cfg.logging.level = "debug".to_string();
         cfg.mime_overrides = Vec::from([
             (".wasm".to_string(), "application/wasm".to_string()),
