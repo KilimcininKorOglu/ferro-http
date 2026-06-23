@@ -86,8 +86,10 @@ pub enum ParseError {
     BadContentLength,
     /// Both `Content-Length` and `Transfer-Encoding` present (request smuggling).
     ConflictingFraming,
-    /// `Transfer-Encoding` (e.g. chunked) is not yet supported.
+    /// A `Transfer-Encoding` other than a lone `chunked` (not supported).
     UnsupportedTransferEncoding,
+    /// A malformed chunk size, terminator, or trailer in a chunked body.
+    MalformedChunk,
     BodyTooLarge,
 }
 
@@ -104,6 +106,7 @@ impl fmt::Display for ParseError {
             ParseError::BadContentLength => "invalid Content-Length",
             ParseError::ConflictingFraming => "conflicting Content-Length and Transfer-Encoding",
             ParseError::UnsupportedTransferEncoding => "unsupported Transfer-Encoding",
+            ParseError::MalformedChunk => "malformed chunked body",
             ParseError::BodyTooLarge => "request body too large",
         };
         f.write_str(msg)
@@ -152,17 +155,23 @@ pub fn parse(buf: &[u8]) -> Result<Parsed, ParseError> {
         headers.push(Header { name, value });
     }
 
-    let body_len = determine_body_len(&headers)?;
-    if body_len > MAX_BODY_BYTES {
-        return Err(ParseError::BodyTooLarge);
-    }
+    let (body, consumed) = match body_framing(&headers)? {
+        Framing::Fixed(len) => {
+            if len > MAX_BODY_BYTES {
+                return Err(ParseError::BodyTooLarge);
+            }
+            let total = head_end + len;
+            if buf.len() < total {
+                return Ok(Parsed::Partial);
+            }
+            (buf[head_end..total].to_vec(), total)
+        }
+        Framing::Chunked => match decode_chunked(&buf[head_end..])? {
+            ChunkOutcome::Partial => return Ok(Parsed::Partial),
+            ChunkOutcome::Complete { body, consumed } => (body, head_end + consumed),
+        },
+    };
 
-    let total = head_end + body_len;
-    if buf.len() < total {
-        return Ok(Parsed::Partial);
-    }
-
-    let body = buf[head_end..total].to_vec();
     Ok(Parsed::Complete {
         request: Request {
             method,
@@ -171,7 +180,7 @@ pub fn parse(buf: &[u8]) -> Result<Parsed, ParseError> {
             headers,
             body,
         },
-        consumed: total,
+        consumed,
     })
 }
 
@@ -239,37 +248,133 @@ fn parse_header_line(line: &[u8]) -> Result<(String, String), ParseError> {
     Ok((name.to_string(), value.to_string()))
 }
 
-fn determine_body_len(headers: &[Header]) -> Result<usize, ParseError> {
-    let has_te = headers
+/// How the request body is framed.
+enum Framing {
+    /// A body of exactly this many bytes (`Content-Length`, possibly zero).
+    Fixed(usize),
+    /// A chunked body to be decoded.
+    Chunked,
+}
+
+fn body_framing(headers: &[Header]) -> Result<Framing, ParseError> {
+    let transfer_encodings: Vec<&Header> = headers
         .iter()
-        .any(|h| h.name.eq_ignore_ascii_case("transfer-encoding"));
+        .filter(|h| h.name.eq_ignore_ascii_case("transfer-encoding"))
+        .collect();
     let content_lengths: Vec<&Header> = headers
         .iter()
         .filter(|h| h.name.eq_ignore_ascii_case("content-length"))
         .collect();
 
-    if has_te && !content_lengths.is_empty() {
+    if !transfer_encodings.is_empty() && !content_lengths.is_empty() {
         return Err(ParseError::ConflictingFraming);
     }
-    if has_te {
-        // Chunked decoding is deferred to a later phase; fail loudly for now.
+    if !transfer_encodings.is_empty() {
+        // Only a single `Transfer-Encoding: chunked` is supported; multiple TE
+        // headers or any other coding is rejected rather than mis-framed.
+        if transfer_encodings.len() == 1
+            && transfer_encodings[0]
+                .value
+                .trim()
+                .eq_ignore_ascii_case("chunked")
+        {
+            return Ok(Framing::Chunked);
+        }
         return Err(ParseError::UnsupportedTransferEncoding);
     }
     if content_lengths.len() > 1 {
         return Err(ParseError::BadContentLength);
     }
-
     if let Some(h) = content_lengths.first() {
         let raw = h.value.trim();
         if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
             return Err(ParseError::BadContentLength);
         }
-        return raw
+        let len = raw
             .parse::<usize>()
-            .map_err(|_| ParseError::BadContentLength);
+            .map_err(|_| ParseError::BadContentLength)?;
+        return Ok(Framing::Fixed(len));
     }
+    Ok(Framing::Fixed(0))
+}
 
-    Ok(0)
+/// Outcome of decoding a chunked body from the bytes after the header block.
+enum ChunkOutcome {
+    Partial,
+    Complete { body: Vec<u8>, consumed: usize },
+}
+
+/// Decodes a chunked transfer body. `buf` begins at the first chunk size line.
+/// Chunk extensions and trailers are skipped; their content is not retained.
+fn decode_chunked(buf: &[u8]) -> Result<ChunkOutcome, ParseError> {
+    let mut pos = 0;
+    let mut body = Vec::new();
+    loop {
+        let line_len = match find_subslice(&buf[pos..], b"\r\n") {
+            Some(i) => i,
+            None => return Ok(ChunkOutcome::Partial),
+        };
+        let size_line = &buf[pos..pos + line_len];
+        // Drop any chunk extensions following a ';'.
+        let size_tok = match size_line.iter().position(|&b| b == b';') {
+            Some(i) => &size_line[..i],
+            None => size_line,
+        };
+        let size = parse_hex(size_tok)?;
+        let data_start = pos + line_len + 2;
+
+        if size == 0 {
+            // Final chunk: skip optional trailers up to the terminating blank line.
+            let mut tpos = data_start;
+            loop {
+                let trailer_len = match find_subslice(&buf[tpos..], b"\r\n") {
+                    Some(i) => i,
+                    None => return Ok(ChunkOutcome::Partial),
+                };
+                if trailer_len == 0 {
+                    return Ok(ChunkOutcome::Complete {
+                        body,
+                        consumed: tpos + 2,
+                    });
+                }
+                tpos += trailer_len + 2;
+            }
+        }
+
+        let data_end = data_start + size;
+        if buf.len() < data_end + 2 {
+            return Ok(ChunkOutcome::Partial);
+        }
+        if &buf[data_end..data_end + 2] != b"\r\n" {
+            return Err(ParseError::MalformedChunk);
+        }
+        body.extend_from_slice(&buf[data_start..data_end]);
+        if body.len() > MAX_BODY_BYTES {
+            return Err(ParseError::BodyTooLarge);
+        }
+        pos = data_end + 2;
+    }
+}
+
+/// Parses a hexadecimal chunk size, rejecting empty or overflowing values.
+fn parse_hex(bytes: &[u8]) -> Result<usize, ParseError> {
+    if bytes.is_empty() {
+        return Err(ParseError::MalformedChunk);
+    }
+    let mut value: usize = 0;
+    for &b in bytes {
+        let digit = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return Err(ParseError::MalformedChunk),
+        };
+        value = value
+            .checked_mul(16)
+            .and_then(|v| v.checked_add(digit as usize))
+            .ok_or(ParseError::MalformedChunk)?;
+    }
+    Ok(value)
 }
 
 /// RFC 7230 token characters (valid in a header field name).
@@ -403,8 +508,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_chunked_for_now() {
-        let raw = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    fn decodes_chunked_body() {
+        // "Wikipedia" in two chunks, then the terminating zero chunk.
+        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+        let (req, consumed) = complete(raw);
+        assert_eq!(req.body, b"Wikipedia");
+        assert_eq!(consumed, raw.len());
+    }
+
+    #[test]
+    fn chunked_body_is_partial_until_terminator() {
+        // The zero chunk and final CRLF have not arrived yet.
+        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n";
+        assert!(matches!(parse(raw).unwrap(), Parsed::Partial));
+    }
+
+    #[test]
+    fn rejects_malformed_chunk_size() {
+        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\nWiki\r\n0\r\n\r\n";
+        assert_eq!(parse(raw), Err(ParseError::MalformedChunk));
+    }
+
+    #[test]
+    fn rejects_non_chunked_transfer_encoding() {
+        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n";
         assert_eq!(parse(raw), Err(ParseError::UnsupportedTransferEncoding));
     }
 
