@@ -19,6 +19,10 @@
 
 extern crate alloc;
 
+pub mod app;
+
+pub use app::StaticRouter;
+
 use alloc::vec::Vec;
 
 use ferro_core::conn::{Connection, Step};
