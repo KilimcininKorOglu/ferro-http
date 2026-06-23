@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "ferro"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "ferro-core",
  "mio",
@@ -101,14 +101,14 @@ dependencies = [
 
 [[package]]
 name = "ferro-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "miniz_oxide",
 ]
 
 [[package]]
 name = "ferro-embedded"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "ferro-core",
  "smoltcp",
