@@ -34,6 +34,33 @@ fn health(_request: &Request, _params: &Params) -> Response {
     Response::json(StatusCode::OK, "{\"status\":\"ok\"}")
 }
 
+/// Builds the application handler from a configuration. Used at startup and on
+/// every admin hot-reload, so it reconstructs everything config-derived and
+/// re-registers the API routes.
+fn build_app(config: &Config) -> App {
+    let mut router = Router::new();
+    router.route(Method::Get, "/api/health", health);
+
+    let rate_limiter = config
+        .security
+        .rate_limit
+        .enabled
+        .then(|| RateLimiter::new(config.security.rate_limit.clone()));
+
+    App::new(
+        router,
+        FsAssets::new(
+            &config.static_files.root,
+            config.static_files.follow_symlinks,
+        ),
+        config.static_files.index_files.clone(),
+        config.mime_overrides.clone(),
+        rate_limiter,
+        config.logging.access_log,
+        config.compression.clone(),
+    )
+}
+
 fn main() {
     let config = load_config();
 
@@ -48,27 +75,7 @@ fn main() {
         }
     };
 
-    let mut router = Router::new();
-    router.route(Method::Get, "/api/health", health);
-
-    let rate_limiter = config
-        .security
-        .rate_limit
-        .enabled
-        .then(|| RateLimiter::new(config.security.rate_limit.clone()));
-
-    let app = App::new(
-        router,
-        FsAssets::new(
-            &config.static_files.root,
-            config.static_files.follow_symlinks,
-        ),
-        config.static_files.index_files.clone(),
-        config.mime_overrides.clone(),
-        rate_limiter,
-        config.logging.access_log,
-        config.compression.clone(),
-    );
+    let app = build_app(&config);
 
     let options = Options {
         idle_timeout: Duration::from_secs(config.server.keep_alive_secs.max(1)),
@@ -116,7 +123,26 @@ fn main() {
         config.static_files.root
     );
 
-    match transport_mio::serve(addr, &app, &options, &tls, &shutdown) {
+    // With the webui feature and admin credentials set, wrap the app in the
+    // admin panel; otherwise serve the plain app (panel disabled, zero overhead).
+    #[cfg(feature = "webui")]
+    let serve_result = if config.admin.username.is_empty() {
+        eprintln!("[ferro] webui built in but no admin credentials set; panel disabled");
+        transport_mio::serve(addr, &app, &options, &tls, &shutdown)
+    } else {
+        eprintln!("[ferro] admin panel enabled at {scheme}://{addr}/admin");
+        let config_path = std::path::PathBuf::from(
+            std::env::args()
+                .nth(1)
+                .unwrap_or_else(|| "config.json".to_string()),
+        );
+        let admin = webui::WebAdmin::new(config.clone(), config_path, Box::new(build_app));
+        transport_mio::serve(addr, &admin, &options, &tls, &shutdown)
+    };
+    #[cfg(not(feature = "webui"))]
+    let serve_result = transport_mio::serve(addr, &app, &options, &tls, &shutdown);
+
+    match serve_result {
         Ok(()) => eprintln!("[ferro] graceful shutdown complete"),
         Err(e) => {
             eprintln!("[ferro] fatal: {e}");

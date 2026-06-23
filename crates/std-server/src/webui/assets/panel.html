@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ferro admin</title>
+<style>
+  :root { --bg:#0f1117; --card:#1a1d27; --fg:#e6e8ee; --muted:#9aa0ad; --accent:#4f8cff; --ok:#3ecf8e; --err:#ff6b6b; --border:#2a2e3a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:18px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); }
+  main { max-width:880px; margin:0 auto; padding:20px; display:grid; gap:20px; grid-template-columns:1fr; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px; }
+  .card h2 { margin:0 0 14px; font-size:15px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); }
+  .stat { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .stat .v { font-size:22px; font-weight:700; }
+  .stat .k { font-size:12px; color:var(--muted); margin-top:2px; }
+  textarea { width:100%; min-height:320px; resize:vertical; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:12px; font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .row { display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 16px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--fg); border:1px solid var(--border); }
+  button:active { transform:translateY(1px); }
+  #msg { font-size:13px; }
+  #msg.ok { color:var(--ok); }
+  #msg.err { color:var(--err); }
+  @media (max-width:560px){ main{padding:14px;} .stat .v{font-size:19px;} }
+</style>
+</head>
+<body>
+<header><span class="dot"></span><h1>ferro admin</h1></header>
+<main>
+  <section class="card">
+    <h2>Statistics</h2>
+    <div class="grid" id="stats">
+      <div class="stat"><div class="v" id="s-up">-</div><div class="k">uptime (s)</div></div>
+      <div class="stat"><div class="v" id="s-total">-</div><div class="k">requests</div></div>
+      <div class="stat"><div class="v" id="s-2xx">-</div><div class="k">2xx</div></div>
+      <div class="stat"><div class="v" id="s-3xx">-</div><div class="k">3xx</div></div>
+      <div class="stat"><div class="v" id="s-4xx">-</div><div class="k">4xx</div></div>
+      <div class="stat"><div class="v" id="s-5xx">-</div><div class="k">5xx</div></div>
+      <div class="stat"><div class="v" id="s-bytes">-</div><div class="k">bytes out</div></div>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Configuration</h2>
+    <textarea id="cfg" spellcheck="false" autocomplete="off"></textarea>
+    <div class="row">
+      <button id="save">Save &amp; apply</button>
+      <button id="reload" class="secondary">Reload from server</button>
+      <span id="msg"></span>
+    </div>
+  </section>
+</main>
+<script>
+  var $ = function (id) { return document.getElementById(id); };
+  function setMsg(text, ok) { var m = $('msg'); m.textContent = text; m.className = ok ? 'ok' : 'err'; }
+
+  function loadStats() {
+    fetch('/admin/api/stats').then(function (r) { return r.json(); }).then(function (s) {
+      $('s-up').textContent = s.uptime_secs;
+      $('s-total').textContent = s.total_requests;
+      $('s-2xx').textContent = s.status_2xx;
+      $('s-3xx').textContent = s.status_3xx;
+      $('s-4xx').textContent = s.status_4xx;
+      $('s-5xx').textContent = s.status_5xx;
+      $('s-bytes').textContent = s.bytes_out;
+    }).catch(function () {});
+  }
+
+  function loadConfig() {
+    fetch('/admin/api/config').then(function (r) { return r.text(); }).then(function (t) {
+      $('cfg').value = t;
+      setMsg('Loaded current configuration.', true);
+    }).catch(function () { setMsg('Failed to load configuration.', false); });
+  }
+
+  function saveConfig() {
+    fetch('/admin/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: $('cfg').value })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .then(function (res) {
+        if (!res.ok) { setMsg('Error: ' + (res.body.error || 'rejected'), false); return; }
+        var note = 'Applied.';
+        if (res.body.restart_required && res.body.restart_required.length) {
+          note += ' Restart required for: ' + res.body.restart_required.join(', ') + '.';
+        }
+        setMsg(note, true);
+      })
+      .catch(function () { setMsg('Request failed.', false); });
+  }
+
+  $('save').addEventListener('click', saveConfig);
+  $('reload').addEventListener('click', loadConfig);
+  loadConfig();
+  loadStats();
+  setInterval(loadStats, 3000);
+</script>
+</body>
+</html>
