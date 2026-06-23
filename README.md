@@ -6,7 +6,8 @@ ferro is built around a single allocation-only `no_std` core that holds all HTTP
 logic, with two build-time profiles:
 
 - **std** (default): high-performance event loop, serves from the filesystem.
-  Targets Linux, macOS, Windows, Docker, and embedded Linux.
+  Targets Linux, macOS, Windows, Docker, and embedded Linux. Optional, default-off
+  cargo features add gzip compression and TLS termination (rustls).
 - **embedded**: `no_std` with smoltcp and compile-time embedded assets and
   config. Targets bare-metal systems.
 
