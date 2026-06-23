@@ -24,16 +24,35 @@ pub enum Step {
     Write { bytes: Vec<u8>, close: bool },
 }
 
+/// Response-finalization policy applied to every response on a connection.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ResponsePolicy {
+    /// Whether to attach the standard security headers.
+    pub security_headers: bool,
+}
+
 /// A single client connection accumulating bytes until a request is complete.
 #[derive(Default)]
 pub struct Connection {
     buf: Vec<u8>,
+    policy: ResponsePolicy,
 }
 
 impl Connection {
-    /// Creates an empty connection state.
+    /// Creates an empty connection state with the default (no-op) policy.
     pub fn new() -> Connection {
-        Connection { buf: Vec::new() }
+        Connection {
+            buf: Vec::new(),
+            policy: ResponsePolicy::default(),
+        }
+    }
+
+    /// Creates an empty connection state with an explicit response policy.
+    pub fn with_policy(policy: ResponsePolicy) -> Connection {
+        Connection {
+            buf: Vec::new(),
+            policy,
+        }
     }
 
     /// Appends newly received bytes to the connection buffer.
@@ -47,13 +66,15 @@ impl Connection {
     /// or [`Step::Write`] with the serialized response otherwise. A parse error
     /// yields an error response and closes the connection.
     pub fn step<S: Service>(&mut self, service: &S, now_unix_secs: u64) -> Step {
+        let policy = self.policy;
         match parse(&self.buf) {
             Ok(Parsed::Partial) => Step::NeedMore,
             Ok(Parsed::Complete { request, consumed }) => {
                 self.buf.drain(..consumed);
                 let keep_alive = request.keep_alive();
                 let head_only = request.method.is_head();
-                let response = finalize(service.handle(&request), now_unix_secs, keep_alive);
+                let response =
+                    finalize(service.handle(&request), now_unix_secs, keep_alive, &policy);
                 Step::Write {
                     bytes: response.serialize(head_only),
                     close: !keep_alive,
@@ -65,6 +86,7 @@ impl Connection {
                     Response::text(status, status.reason()),
                     now_unix_secs,
                     false,
+                    &policy,
                 );
                 // An unparseable stream cannot be safely resynchronized; close.
                 Step::Write {
@@ -76,12 +98,31 @@ impl Connection {
     }
 }
 
-/// Adds the protocol-level `Date` and `Connection` headers to a response.
-fn finalize(response: Response, now_unix_secs: u64, keep_alive: bool) -> Response {
+/// Adds the protocol-level `Date` and `Connection` headers, plus the standard
+/// security headers when the policy enables them.
+fn finalize(
+    response: Response,
+    now_unix_secs: u64,
+    keep_alive: bool,
+    policy: &ResponsePolicy,
+) -> Response {
     let connection = if keep_alive { "keep-alive" } else { "close" };
-    response
+    let response = response
         .with_header("Date", &http_date(now_unix_secs))
-        .with_header("Connection", connection)
+        .with_header("Connection", connection);
+    if policy.security_headers {
+        apply_security_headers(response)
+    } else {
+        response
+    }
+}
+
+/// Attaches a modern, conservative set of security headers.
+fn apply_security_headers(response: Response) -> Response {
+    response
+        .with_header("X-Content-Type-Options", "nosniff")
+        .with_header("X-Frame-Options", "SAMEORIGIN")
+        .with_header("Referrer-Policy", "strict-origin-when-cross-origin")
 }
 
 /// Maps a parse error to the status code reported to the client.
@@ -186,5 +227,25 @@ mod tests {
         let text = wire(&conn.step(&router(), 0));
         assert!(text.contains("Date: Thu, 01 Jan 1970 00:00:00 GMT\r\n"));
         assert!(text.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn security_headers_applied_only_when_policy_enables() {
+        // Default policy: no security headers.
+        let mut plain = Connection::new();
+        plain.feed(b"GET / HTTP/1.1\r\n\r\n");
+        assert!(!wire(&plain.step(&router(), 0)).contains("X-Content-Type-Options"));
+
+        // Enabled policy: standard security headers attached, even on errors.
+        let policy = ResponsePolicy {
+            security_headers: true,
+        };
+        let mut secured = Connection::with_policy(policy);
+        secured.feed(b"GET / HTTP/2.0\r\n\r\n"); // a 505 error path
+        let text = wire(&secured.step(&router(), 0));
+        assert!(text.starts_with("HTTP/1.1 505 "));
+        assert!(text.contains("X-Content-Type-Options: nosniff\r\n"));
+        assert!(text.contains("X-Frame-Options: SAMEORIGIN\r\n"));
+        assert!(text.contains("Referrer-Policy: strict-origin-when-cross-origin\r\n"));
     }
 }

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
 
-use ferro_core::conn::{Connection, Step};
+use ferro_core::conn::{Connection, ResponsePolicy, Step};
 use ferro_core::service::Service;
 
 const LISTENER: Token = Token(0);
@@ -29,6 +29,8 @@ pub struct Options {
     pub idle_timeout: Duration,
     /// Maximum number of simultaneous connections.
     pub max_connections: usize,
+    /// Whether responses receive the standard security headers.
+    pub security_headers: bool,
 }
 
 struct Conn {
@@ -42,11 +44,11 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(socket: TcpStream, token: Token) -> Conn {
+    fn new(socket: TcpStream, token: Token, security_headers: bool) -> Conn {
         Conn {
             socket,
             token,
-            state: Connection::new(),
+            state: Connection::with_policy(ResponsePolicy { security_headers }),
             out: Vec::new(),
             wants_write: false,
             close_after_flush: false,
@@ -73,13 +75,7 @@ pub fn serve<S: Service>(addr: SocketAddr, service: &S, options: &Options) -> io
 
         for event in events.iter() {
             match event.token() {
-                LISTENER => accept_all(
-                    &mut poll,
-                    &listener,
-                    &mut conns,
-                    &mut next_token,
-                    options.max_connections,
-                ),
+                LISTENER => accept_all(&mut poll, &listener, &mut conns, &mut next_token, options),
                 token => {
                     let drop_conn = match conns.get_mut(&token) {
                         Some(conn) => {
@@ -105,12 +101,12 @@ fn accept_all(
     listener: &TcpListener,
     conns: &mut HashMap<Token, Conn>,
     next_token: &mut usize,
-    max_connections: usize,
+    options: &Options,
 ) {
     loop {
         match listener.accept() {
             Ok((mut socket, _addr)) => {
-                if conns.len() >= max_connections {
+                if conns.len() >= options.max_connections {
                     // Over capacity: drop the socket, closing it.
                     continue;
                 }
@@ -121,7 +117,7 @@ fn accept_all(
                     .register(&mut socket, token, Interest::READABLE)
                     .is_ok()
                 {
-                    conns.insert(token, Conn::new(socket, token));
+                    conns.insert(token, Conn::new(socket, token, options.security_headers));
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,

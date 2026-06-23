@@ -54,6 +54,7 @@ fn main() {
     let options = Options {
         idle_timeout: Duration::from_secs(config.server.keep_alive_secs.max(1)),
         max_connections: config.server.max_connections,
+        security_headers: config.security.enable_security_headers,
     };
 
     eprintln!(
