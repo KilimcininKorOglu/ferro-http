@@ -107,6 +107,26 @@ archive rather than loaded into the local store:
     docker buildx bake               # scratch, both arches
     docker buildx bake distroless    # distroless, both arches
 
+## Embedded Linux and OpenWRT
+
+The std profile targets small routers and embedded Linux. Each tagged release
+publishes static musl binaries for `x86_64`, `aarch64`, and `armv7` (the common
+OpenWRT arches); cross-compilation uses `cross`. Approximate sizes of the static
+musl binary (stripped): about 530 KB with no features, about 685 KB with
+`gzip` + `webui`. Idle RSS is roughly 1-2 MB and grows only with the number of
+concurrent connections.
+
+For the smallest footprint, build the size-optimized profile and disable any
+features you do not need:
+
+    cargo build --profile min-size -p ferro --target aarch64-unknown-linux-musl
+
+`profile.min-size` (in `Cargo.toml`) sets `opt-level = "z"` and `panic = "abort"`
+for a roughly 14% smaller binary; the default `release` profile keeps `opt-level
+= 3` for maximum throughput. `config.embedded.json` is a low-RAM starting point
+(`worker_threads = 1`, a small `max_connections`, a tight `request_max_bytes`,
+access logging off).
+
 ## Status
 
 Feature-complete for the v1 scope (static file server + API router). The std
