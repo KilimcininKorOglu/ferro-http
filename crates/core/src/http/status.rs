@@ -11,6 +11,7 @@ impl StatusCode {
     pub const CREATED: StatusCode = StatusCode(201);
     pub const NO_CONTENT: StatusCode = StatusCode(204);
     pub const BAD_REQUEST: StatusCode = StatusCode(400);
+    pub const UNAUTHORIZED: StatusCode = StatusCode(401);
     pub const FORBIDDEN: StatusCode = StatusCode(403);
     pub const NOT_FOUND: StatusCode = StatusCode(404);
     pub const METHOD_NOT_ALLOWED: StatusCode = StatusCode(405);
@@ -39,6 +40,7 @@ impl StatusCode {
             201 => "Created",
             204 => "No Content",
             400 => "Bad Request",
+            401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
@@ -69,6 +71,8 @@ mod tests {
         assert_eq!(StatusCode::NOT_FOUND.code(), 404);
         assert_eq!(StatusCode::NOT_FOUND.reason(), "Not Found");
         assert_eq!(StatusCode::IM_A_TEAPOT.reason(), "I'm a teapot");
+        assert_eq!(StatusCode::UNAUTHORIZED.code(), 401);
+        assert_eq!(StatusCode::UNAUTHORIZED.reason(), "Unauthorized");
     }
 
     #[test]
