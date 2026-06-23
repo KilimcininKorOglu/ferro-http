@@ -176,7 +176,9 @@ mod tests {
         }
         assert_eq!(
             limiter.check(PEER, 3),
-            Decision::Deny { retry_after_secs: 2 }
+            Decision::Deny {
+                retry_after_secs: 2
+            }
         );
         // Ban expired at t=5; the window has not elapsed, but the count resets.
         assert_eq!(limiter.check(PEER, 6), Decision::Allow);
