@@ -62,6 +62,13 @@ fn build_app(config: &Config) -> App {
 }
 
 fn main() {
+    // `--version`/`-V` prints the version and exits, before the first argument is
+    // interpreted as a config path.
+    if let Some("--version") | Some("-V") = std::env::args().nth(1).as_deref() {
+        println!("ferro {}", ferro_core::VERSION);
+        return;
+    }
+
     let config = load_config();
 
     let addr: SocketAddr = match format!("{}:{}", config.server.bind, config.server.port).parse() {

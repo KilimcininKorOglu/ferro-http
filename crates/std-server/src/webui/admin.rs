@@ -240,7 +240,9 @@ fn panel_response() -> Response {
             "Content-Type".to_string(),
             "text/html; charset=utf-8".to_string(),
         )],
-        body: PANEL_HTML.as_bytes().to_vec(),
+        body: PANEL_HTML
+            .replace("{{VERSION}}", ferro_core::VERSION)
+            .into_bytes(),
     }
 }
 

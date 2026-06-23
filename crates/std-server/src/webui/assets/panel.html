@@ -11,6 +11,7 @@
   header { padding:18px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
   header h1 { font-size:18px; margin:0; font-weight:600; }
   header .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); }
+  header .ver { font-size:12px; color:var(--muted); border:1px solid var(--border); border-radius:6px; padding:2px 7px; }
   .langs { margin-left:auto; display:flex; gap:6px; }
   .langs button { background:transparent; border:1px solid var(--border); color:var(--muted); padding:4px 10px; border-radius:6px; font-size:13px; cursor:pointer; }
   .langs button.active { color:#fff; border-color:var(--accent); }
@@ -43,6 +44,7 @@
 <body>
 <header>
   <span class="dot"></span><h1 data-i18n="app.title">ferro admin</h1>
+  <span class="ver">v{{VERSION}}</span>
   <div class="langs">
     <button data-lang="en" onclick="setLang('en')">EN</button>
     <button data-lang="tr" onclick="setLang('tr')">TR</button>
