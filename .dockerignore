@@ -1,4 +1,5 @@
 /target
+crates/embedded-server/target
 .git
 .github
 **/*.rs.bk
