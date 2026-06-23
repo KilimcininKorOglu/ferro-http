@@ -69,6 +69,11 @@ impl Response {
             if name.eq_ignore_ascii_case("content-length") {
                 continue;
             }
+            // Drop header-injection attempts: a CR, LF, or NUL in a header would
+            // let an attacker forge extra headers or split the response.
+            if has_forbidden_byte(name) || has_forbidden_byte(value) {
+                continue;
+            }
             head.push_str(name);
             head.push_str(": ");
             head.push_str(value);
@@ -88,6 +93,11 @@ impl Response {
 
 fn header(name: &str, value: &str) -> Vec<(String, String)> {
     Vec::from([(name.to_string(), value.to_string())])
+}
+
+/// True if a header name/value contains a byte that could split the response.
+fn has_forbidden_byte(s: &str) -> bool {
+    s.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
 }
 
 #[cfg(test)]
@@ -130,5 +140,17 @@ mod tests {
         assert!(wire.contains("Content-Length: 3\r\n"));
         assert!(!wire.contains("999"));
         assert!(wire.contains("X-Test: 1\r\n"));
+    }
+
+    #[test]
+    fn header_injection_is_dropped() {
+        // A CRLF smuggled into a header value must not forge a new header.
+        let resp = Response::new(StatusCode::OK)
+            .with_header("X-Bad", "a\r\nInjected: 1")
+            .with_header("X-Good", "ok");
+        let wire = as_text(&resp.serialize(false));
+        assert!(!wire.contains("Injected: 1"));
+        assert!(!wire.contains("X-Bad"));
+        assert!(wire.contains("X-Good: ok\r\n"));
     }
 }

@@ -8,6 +8,7 @@
 
 use alloc::vec::Vec;
 
+use crate::http::date::http_date;
 use crate::http::request::{parse, ParseError, Parsed};
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
@@ -45,14 +46,14 @@ impl Connection {
     /// Returns [`Step::NeedMore`] when the buffer holds only a partial request,
     /// or [`Step::Write`] with the serialized response otherwise. A parse error
     /// yields an error response and closes the connection.
-    pub fn step<S: Service>(&mut self, service: &S) -> Step {
+    pub fn step<S: Service>(&mut self, service: &S, now_unix_secs: u64) -> Step {
         match parse(&self.buf) {
             Ok(Parsed::Partial) => Step::NeedMore,
             Ok(Parsed::Complete { request, consumed }) => {
                 self.buf.drain(..consumed);
                 let keep_alive = request.keep_alive();
                 let head_only = request.method.is_head();
-                let response = service.handle(&request);
+                let response = finalize(service.handle(&request), now_unix_secs, keep_alive);
                 Step::Write {
                     bytes: response.serialize(head_only),
                     close: !keep_alive,
@@ -60,7 +61,11 @@ impl Connection {
             }
             Err(err) => {
                 let status = error_status(err);
-                let response = Response::text(status, status.reason());
+                let response = finalize(
+                    Response::text(status, status.reason()),
+                    now_unix_secs,
+                    false,
+                );
                 // An unparseable stream cannot be safely resynchronized; close.
                 Step::Write {
                     bytes: response.serialize(false),
@@ -69,6 +74,14 @@ impl Connection {
             }
         }
     }
+}
+
+/// Adds the protocol-level `Date` and `Connection` headers to a response.
+fn finalize(response: Response, now_unix_secs: u64, keep_alive: bool) -> Response {
+    let connection = if keep_alive { "keep-alive" } else { "close" };
+    response
+        .with_header("Date", &http_date(now_unix_secs))
+        .with_header("Connection", connection)
 }
 
 /// Maps a parse error to the status code reported to the client.
@@ -111,14 +124,14 @@ mod tests {
     fn partial_request_needs_more() {
         let mut conn = Connection::new();
         conn.feed(b"GET / HTTP/1.1\r\n");
-        assert_eq!(conn.step(&router()), Step::NeedMore);
+        assert_eq!(conn.step(&router(), 0), Step::NeedMore);
     }
 
     #[test]
     fn complete_request_is_dispatched() {
         let mut conn = Connection::new();
         conn.feed(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
-        let step = conn.step(&router());
+        let step = conn.step(&router(), 0);
         match &step {
             Step::Write { close, .. } => assert!(*close, "Connection: close must close"),
             Step::NeedMore => panic!("expected write"),
@@ -130,7 +143,7 @@ mod tests {
     fn keep_alive_request_does_not_close() {
         let mut conn = Connection::new();
         conn.feed(b"GET / HTTP/1.1\r\n\r\n");
-        match conn.step(&router()) {
+        match conn.step(&router(), 0) {
             Step::Write { close, .. } => assert!(!close, "HTTP/1.1 defaults to keep-alive"),
             Step::NeedMore => panic!("expected write"),
         }
@@ -140,14 +153,14 @@ mod tests {
     fn unknown_route_yields_404() {
         let mut conn = Connection::new();
         conn.feed(b"GET /missing HTTP/1.1\r\n\r\n");
-        assert!(wire(&conn.step(&router())).starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(wire(&conn.step(&router(), 0)).starts_with("HTTP/1.1 404 Not Found\r\n"));
     }
 
     #[test]
     fn parse_error_responds_and_closes() {
         let mut conn = Connection::new();
         conn.feed(b"GET / HTTP/2.0\r\n\r\n");
-        let step = conn.step(&router());
+        let step = conn.step(&router(), 0);
         match &step {
             Step::Write { close, .. } => assert!(*close),
             Step::NeedMore => panic!("expected write"),
@@ -160,8 +173,18 @@ mod tests {
         // Two keep-alive requests arrive together; each step handles one.
         let mut conn = Connection::new();
         conn.feed(b"GET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n");
-        assert!(matches!(conn.step(&router()), Step::Write { .. }));
-        assert!(matches!(conn.step(&router()), Step::Write { .. }));
-        assert_eq!(conn.step(&router()), Step::NeedMore);
+        assert!(matches!(conn.step(&router(), 0), Step::Write { .. }));
+        assert!(matches!(conn.step(&router(), 0), Step::Write { .. }));
+        assert_eq!(conn.step(&router(), 0), Step::NeedMore);
+    }
+
+    #[test]
+    fn response_carries_date_and_connection_headers() {
+        // Every response gets a Date and an explicit Connection header.
+        let mut conn = Connection::new();
+        conn.feed(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+        let text = wire(&conn.step(&router(), 0));
+        assert!(text.contains("Date: Thu, 01 Jan 1970 00:00:00 GMT\r\n"));
+        assert!(text.contains("Connection: close\r\n"));
     }
 }

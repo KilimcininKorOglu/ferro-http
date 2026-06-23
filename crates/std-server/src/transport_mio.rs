@@ -147,8 +147,9 @@ fn handle_ready<S: Service>(poll: &Poll, conn: &mut Conn, readable: bool, servic
         }
 
         // Drive the state machine over everything buffered (handles pipelining).
+        let now = unix_secs();
         loop {
-            match conn.state.step(service) {
+            match conn.state.step(service, now) {
                 Step::NeedMore => break,
                 Step::Write { bytes, close } => {
                     conn.out.extend_from_slice(&bytes);
@@ -213,6 +214,14 @@ fn close_conn(poll: &Poll, conns: &mut HashMap<Token, Conn>, token: Token) {
     if let Some(mut conn) = conns.remove(&token) {
         let _ = poll.registry().deregister(&mut conn.socket);
     }
+}
+
+/// Current Unix time in seconds, for the `Date` header.
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Closes connections idle longer than the timeout.
