@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 
 use crate::http::date::http_date;
-use crate::http::request::{parse, ParseError, Parsed};
+use crate::http::request::{parse_with, ParseError, Parsed, MAX_BODY_BYTES};
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
 use crate::service::Service;
@@ -32,18 +32,25 @@ pub struct ResponsePolicy {
 }
 
 /// A single client connection accumulating bytes until a request is complete.
-#[derive(Default)]
 pub struct Connection {
     buf: Vec<u8>,
     policy: ResponsePolicy,
+    max_body: usize,
+}
+
+impl Default for Connection {
+    fn default() -> Connection {
+        Connection::new()
+    }
 }
 
 impl Connection {
-    /// Creates an empty connection state with the default (no-op) policy.
+    /// Creates an empty connection state with the default policy and body limit.
     pub fn new() -> Connection {
         Connection {
             buf: Vec::new(),
             policy: ResponsePolicy::default(),
+            max_body: MAX_BODY_BYTES,
         }
     }
 
@@ -52,7 +59,14 @@ impl Connection {
         Connection {
             buf: Vec::new(),
             policy,
+            max_body: MAX_BODY_BYTES,
         }
+    }
+
+    /// Sets the maximum request body size (bytes) accepted on this connection.
+    pub fn max_body(mut self, max_body: usize) -> Connection {
+        self.max_body = max_body;
+        self
     }
 
     /// Appends newly received bytes to the connection buffer.
@@ -67,7 +81,7 @@ impl Connection {
     /// yields an error response and closes the connection.
     pub fn step<S: Service>(&mut self, service: &S, now_unix_secs: u64) -> Step {
         let policy = self.policy;
-        match parse(&self.buf) {
+        match parse_with(&self.buf, self.max_body) {
             Ok(Parsed::Partial) => Step::NeedMore,
             Ok(Parsed::Complete { request, consumed }) => {
                 self.buf.drain(..consumed);

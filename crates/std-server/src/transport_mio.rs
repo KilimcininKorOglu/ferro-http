@@ -31,6 +31,8 @@ pub struct Options {
     pub max_connections: usize,
     /// Whether responses receive the standard security headers.
     pub security_headers: bool,
+    /// Maximum accepted request body size, in bytes.
+    pub max_body: usize,
 }
 
 struct Conn {
@@ -44,11 +46,11 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(socket: TcpStream, token: Token, security_headers: bool) -> Conn {
+    fn new(socket: TcpStream, token: Token, security_headers: bool, max_body: usize) -> Conn {
         Conn {
             socket,
             token,
-            state: Connection::with_policy(ResponsePolicy { security_headers }),
+            state: Connection::with_policy(ResponsePolicy { security_headers }).max_body(max_body),
             out: Vec::new(),
             wants_write: false,
             close_after_flush: false,
@@ -117,7 +119,10 @@ fn accept_all(
                     .register(&mut socket, token, Interest::READABLE)
                     .is_ok()
                 {
-                    conns.insert(token, Conn::new(socket, token, options.security_headers));
+                    conns.insert(
+                        token,
+                        Conn::new(socket, token, options.security_headers, options.max_body),
+                    );
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,

@@ -122,8 +122,14 @@ pub enum Parsed {
     Complete { request: Request, consumed: usize },
 }
 
-/// Attempts to parse a single request from the front of `buf`.
+/// Attempts to parse a single request from the front of `buf`, using the
+/// default body-size limit ([`MAX_BODY_BYTES`]).
 pub fn parse(buf: &[u8]) -> Result<Parsed, ParseError> {
+    parse_with(buf, MAX_BODY_BYTES)
+}
+
+/// Like [`parse`], but caps the request body at `max_body` bytes.
+pub fn parse_with(buf: &[u8], max_body: usize) -> Result<Parsed, ParseError> {
     let head_end = match find_subslice(buf, b"\r\n\r\n") {
         Some(i) => i + 4,
         None => {
@@ -157,7 +163,7 @@ pub fn parse(buf: &[u8]) -> Result<Parsed, ParseError> {
 
     let (body, consumed) = match body_framing(&headers)? {
         Framing::Fixed(len) => {
-            if len > MAX_BODY_BYTES {
+            if len > max_body {
                 return Err(ParseError::BodyTooLarge);
             }
             let total = head_end + len;
@@ -166,7 +172,7 @@ pub fn parse(buf: &[u8]) -> Result<Parsed, ParseError> {
             }
             (buf[head_end..total].to_vec(), total)
         }
-        Framing::Chunked => match decode_chunked(&buf[head_end..])? {
+        Framing::Chunked => match decode_chunked(&buf[head_end..], max_body)? {
             ChunkOutcome::Partial => return Ok(Parsed::Partial),
             ChunkOutcome::Complete { body, consumed } => (body, head_end + consumed),
         },
@@ -306,7 +312,7 @@ enum ChunkOutcome {
 
 /// Decodes a chunked transfer body. `buf` begins at the first chunk size line.
 /// Chunk extensions and trailers are skipped; their content is not retained.
-fn decode_chunked(buf: &[u8]) -> Result<ChunkOutcome, ParseError> {
+fn decode_chunked(buf: &[u8], max_body: usize) -> Result<ChunkOutcome, ParseError> {
     let mut pos = 0;
     let mut body = Vec::new();
     loop {
@@ -349,7 +355,7 @@ fn decode_chunked(buf: &[u8]) -> Result<ChunkOutcome, ParseError> {
             return Err(ParseError::MalformedChunk);
         }
         body.extend_from_slice(&buf[data_start..data_end]);
-        if body.len() > MAX_BODY_BYTES {
+        if body.len() > max_body {
             return Err(ParseError::BodyTooLarge);
         }
         pos = data_end + 2;
@@ -556,5 +562,17 @@ mod tests {
         assert_eq!(first.target, "/a");
         let (second, _) = complete(&raw[consumed..]);
         assert_eq!(second.target, "/b");
+    }
+
+    #[test]
+    fn body_limit_is_configurable() {
+        // A 10-byte body is rejected under a 5-byte cap but accepted under a
+        // higher one, so request_max_bytes can be wired from config.
+        let raw = b"POST /f HTTP/1.1\r\nContent-Length: 10\r\n\r\n0123456789";
+        assert_eq!(parse_with(raw, 5), Err(ParseError::BodyTooLarge));
+        assert!(matches!(
+            parse_with(raw, 100).unwrap(),
+            Parsed::Complete { .. }
+        ));
     }
 }
