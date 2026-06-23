@@ -75,3 +75,33 @@ fn load_key(path: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
     let mut reader = BufReader::new(File::open(path)?);
     rustls_pemfile::private_key(&mut reader)?.ok_or(TlsError::NoPrivateKey)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_cert_file_is_io_error() {
+        let err = server_config("/no/such/cert.pem", "/no/such/key.pem").unwrap_err();
+        assert!(matches!(err, TlsError::Io(_)));
+    }
+
+    #[test]
+    fn keyless_key_file_surfaces_no_private_key() {
+        // A readable key file with no PEM private key must fail loudly, not
+        // silently build a config without a key. Cert loading runs first and an
+        // empty cert file yields an empty chain, so the error is NoPrivateKey.
+        let dir = std::env::temp_dir();
+        let cert = dir.join("ferro_tls_test_empty_cert.pem");
+        let key = dir.join("ferro_tls_test_keyless.pem");
+        std::fs::write(&cert, b"").expect("write temp cert");
+        std::fs::write(&key, b"not a private key\n").expect("write temp key");
+        let result = server_config(
+            cert.to_str().expect("utf8 path"),
+            key.to_str().expect("utf8 path"),
+        );
+        let _ = std::fs::remove_file(&cert);
+        let _ = std::fs::remove_file(&key);
+        assert!(matches!(result, Err(TlsError::NoPrivateKey)));
+    }
+}
