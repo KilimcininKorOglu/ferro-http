@@ -1,8 +1,10 @@
-//! The std-profile request handler: rate limit, API router, static files, 404.
+//! The std-profile request handler: rate limit, API router, static files, 404,
+//! with optional gzip compression and access logging.
 
 use std::net::Ipv6Addr;
 use std::sync::Mutex;
 
+use ferro_core::config::CompressionConfig;
 use ferro_core::handler::static_files::serve_static;
 use ferro_core::http::method::Method;
 use ferro_core::http::request::Request;
@@ -14,8 +16,8 @@ use ferro_core::service::{RequestContext, Service};
 
 use crate::fs_assets::FsAssets;
 
-/// Composes per-peer rate limiting, the API router, and filesystem static
-/// serving, with optional access logging.
+/// Composes per-peer rate limiting, the API router, filesystem static serving,
+/// optional gzip compression, and access logging.
 pub struct App {
     router: Router,
     assets: FsAssets,
@@ -23,6 +25,8 @@ pub struct App {
     mime_overrides: Vec<(String, String)>,
     rate_limiter: Option<Mutex<RateLimiter>>,
     access_log: bool,
+    #[cfg_attr(not(feature = "gzip"), allow(dead_code))]
+    compression: CompressionConfig,
 }
 
 impl App {
@@ -35,6 +39,7 @@ impl App {
         mime_overrides: Vec<(String, String)>,
         rate_limiter: Option<RateLimiter>,
         access_log: bool,
+        compression: CompressionConfig,
     ) -> App {
         App {
             router,
@@ -43,6 +48,7 @@ impl App {
             mime_overrides,
             rate_limiter: rate_limiter.map(Mutex::new),
             access_log,
+            compression,
         }
     }
 
@@ -62,6 +68,28 @@ impl App {
             }
         }
         Response::text(StatusCode::NOT_FOUND, "404 Not Found")
+    }
+
+    #[cfg(feature = "gzip")]
+    fn post_process(&self, request: &Request, response: Response) -> Response {
+        if !self.compression.gzip
+            || response.body.len() < self.compression.min_bytes
+            || !accepts_gzip(request)
+            || !is_compressible(&response)
+            || has_header(&response, "content-encoding")
+        {
+            return response;
+        }
+        let mut response = response;
+        response.body = ferro_core::compress::gzip_encode(&response.body);
+        response
+            .with_header("Content-Encoding", "gzip")
+            .with_header("Vary", "Accept-Encoding")
+    }
+
+    #[cfg(not(feature = "gzip"))]
+    fn post_process(&self, _request: &Request, response: Response) -> Response {
+        response
     }
 
     /// Writes one access-log line when access logging is enabled.
@@ -101,8 +129,46 @@ impl Service for App {
             }
         }
 
-        let response = self.dispatch(request);
+        let response = self.post_process(request, self.dispatch(request));
         self.log(request, ctx, response.status);
         response
     }
+}
+
+#[cfg(feature = "gzip")]
+fn accepts_gzip(request: &Request) -> bool {
+    request.header("accept-encoding").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|enc| matches!(enc.trim().split(';').next(), Some(name) if name.eq_ignore_ascii_case("gzip")))
+    })
+}
+
+#[cfg(feature = "gzip")]
+fn is_compressible(response: &Response) -> bool {
+    match header_value(response, "content-type") {
+        Some(ct) => {
+            let ct = ct.to_ascii_lowercase();
+            ct.starts_with("text/")
+                || ct.starts_with("application/json")
+                || ct.starts_with("application/xml")
+                || ct.starts_with("application/javascript")
+                || ct.starts_with("image/svg+xml")
+        }
+        None => false,
+    }
+}
+
+#[cfg(feature = "gzip")]
+fn header_value<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
+    response
+        .headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+#[cfg(feature = "gzip")]
+fn has_header(response: &Response, name: &str) -> bool {
+    header_value(response, name).is_some()
 }

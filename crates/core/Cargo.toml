@@ -7,3 +7,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"], optional = true }
+
+[features]
+# Optional gzip response compression (off by default; pulls in miniz_oxide).
+gzip = ["dep:miniz_oxide"]

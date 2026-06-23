@@ -60,6 +60,7 @@ fn main() {
         config.mime_overrides.clone(),
         rate_limiter,
         config.logging.access_log,
+        config.compression.clone(),
     );
 
     let options = Options {

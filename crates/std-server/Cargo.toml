@@ -10,6 +10,10 @@ rust-version.workspace = true
 name = "ferro"
 path = "src/main.rs"
 
+[features]
+# Optional gzip response compression (off by default).
+gzip = ["ferro-core/gzip"]
+
 [dependencies]
 ferro-core = { path = "../core" }
 mio = { version = "1.2.1", features = ["net", "os-poll"] }

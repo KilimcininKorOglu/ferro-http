@@ -15,6 +15,8 @@
 extern crate alloc;
 
 pub mod asset;
+#[cfg(feature = "gzip")]
+pub mod compress;
 pub mod config;
 pub mod conn;
 pub mod handler;
