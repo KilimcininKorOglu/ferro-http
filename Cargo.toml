@@ -10,7 +10,7 @@ exclude = ["crates/embedded-server"]
 # host-buildable library, so its loopback transport test runs under `cargo test`.
 
 [workspace.package]
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.75"
