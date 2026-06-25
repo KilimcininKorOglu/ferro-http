@@ -20,6 +20,7 @@ impl StatusCode {
     pub const UNSUPPORTED_MEDIA_TYPE: StatusCode = StatusCode(415);
     pub const IM_A_TEAPOT: StatusCode = StatusCode(418);
     pub const TOO_MANY_REQUESTS: StatusCode = StatusCode(429);
+    pub const REQUEST_HEADER_FIELDS_TOO_LARGE: StatusCode = StatusCode(431);
     pub const INTERNAL_SERVER_ERROR: StatusCode = StatusCode(500);
     pub const NOT_IMPLEMENTED: StatusCode = StatusCode(501);
     pub const HTTP_VERSION_NOT_SUPPORTED: StatusCode = StatusCode(505);
@@ -45,11 +46,12 @@ impl StatusCode {
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
-            413 => "Payload Too Large",
+            413 => "Content Too Large",
             414 => "URI Too Long",
             415 => "Unsupported Media Type",
             418 => "I'm a teapot",
             429 => "Too Many Requests",
+            431 => "Request Header Fields Too Large",
             500 => "Internal Server Error",
             501 => "Not Implemented",
             505 => "HTTP Version Not Supported",
