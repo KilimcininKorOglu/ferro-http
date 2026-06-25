@@ -73,9 +73,13 @@ impl Conn {
         Conn {
             socket,
             token,
-            state: Connection::with_policy(ResponsePolicy { security_headers })
-                .max_body(max_body)
-                .peer(peer),
+            // The std profile always runs on a host with a real clock.
+            state: Connection::with_policy(ResponsePolicy {
+                security_headers,
+                ..ResponsePolicy::default()
+            })
+            .max_body(max_body)
+            .peer(peer),
             out: Vec::new(),
             wants_write: false,
             close_after_flush: false,

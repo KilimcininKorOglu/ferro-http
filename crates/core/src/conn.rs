@@ -9,7 +9,9 @@
 use alloc::vec::Vec;
 
 use crate::http::date::http_date;
-use crate::http::request::{parse_with, ParseError, Parsed, MAX_BODY_BYTES};
+use crate::http::request::{
+    expect_action, parse_with, ExpectAction, ParseError, Parsed, MAX_BODY_BYTES,
+};
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
 use crate::service::{RequestContext, Service};
@@ -25,10 +27,22 @@ pub enum Step {
 }
 
 /// Response-finalization policy applied to every response on a connection.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct ResponsePolicy {
     /// Whether to attach the standard security headers.
     pub security_headers: bool,
+    /// Whether the server has a real clock. A clockless origin server must not
+    /// emit a `Date` header (RFC 9110 6.6.1); defaults to `true`.
+    pub has_clock: bool,
+}
+
+impl Default for ResponsePolicy {
+    fn default() -> ResponsePolicy {
+        ResponsePolicy {
+            security_headers: false,
+            has_clock: true,
+        }
+    }
 }
 
 /// A single client connection accumulating bytes until a request is complete.
@@ -37,6 +51,9 @@ pub struct Connection {
     policy: ResponsePolicy,
     max_body: usize,
     peer: [u8; 16],
+    /// Whether an interim 100 Continue has already been sent for the in-flight
+    /// request, so it is emitted at most once.
+    continue_sent: bool,
 }
 
 impl Default for Connection {
@@ -53,6 +70,7 @@ impl Connection {
             policy: ResponsePolicy::default(),
             max_body: MAX_BODY_BYTES,
             peer: [0u8; 16],
+            continue_sent: false,
         }
     }
 
@@ -63,6 +81,7 @@ impl Connection {
             policy,
             max_body: MAX_BODY_BYTES,
             peer: [0u8; 16],
+            continue_sent: false,
         }
     }
 
@@ -75,6 +94,13 @@ impl Connection {
     /// Sets the peer IP (16 bytes, IPv4 IPv6-mapped) for rate limiting and logs.
     pub fn peer(mut self, peer: [u8; 16]) -> Connection {
         self.peer = peer;
+        self
+    }
+
+    /// Declares whether the server has a real clock. When false, responses omit
+    /// the `Date` header (RFC 9110 6.6.1), for boards without an RTC.
+    pub fn clock(mut self, has_clock: bool) -> Connection {
+        self.policy.has_clock = has_clock;
         self
     }
 
@@ -95,9 +121,35 @@ impl Connection {
             now_unix_secs,
         };
         match parse_with(&self.buf, self.max_body) {
-            Ok(Parsed::Partial) => Step::NeedMore,
+            // While the body is still arriving, honor an Expect header: send an
+            // interim 100 Continue once, or refuse an unsupported expectation
+            // with 417, before the client commits to sending the body (RFC 9110
+            // 10.1.1).
+            Ok(Parsed::Partial) => match expect_action(&self.buf) {
+                ExpectAction::Continue if !self.continue_sent => {
+                    self.continue_sent = true;
+                    Step::Write {
+                        bytes: Response::new(StatusCode::CONTINUE).serialize(false),
+                        close: false,
+                    }
+                }
+                ExpectAction::Unsupported => {
+                    let response = finalize(
+                        Response::text(StatusCode::EXPECTATION_FAILED, "417 Expectation Failed"),
+                        now_unix_secs,
+                        false,
+                        &policy,
+                    );
+                    Step::Write {
+                        bytes: response.serialize(false),
+                        close: true,
+                    }
+                }
+                _ => Step::NeedMore,
+            },
             Ok(Parsed::Complete { request, consumed }) => {
                 self.buf.drain(..consumed);
+                self.continue_sent = false;
                 let keep_alive = request.keep_alive();
                 let head_only = request.method.is_head();
                 let response = finalize(
@@ -138,9 +190,11 @@ fn finalize(
     policy: &ResponsePolicy,
 ) -> Response {
     let connection = if keep_alive { "keep-alive" } else { "close" };
-    let response = response
-        .with_header("Date", &http_date(now_unix_secs))
-        .with_header("Connection", connection);
+    let mut response = response.with_header("Connection", connection);
+    // A clockless origin server must not emit Date (RFC 9110 6.6.1).
+    if policy.has_clock {
+        response = response.with_header("Date", &http_date(now_unix_secs));
+    }
     if policy.security_headers {
         apply_security_headers(response)
     } else {
@@ -278,6 +332,7 @@ mod tests {
         // Enabled policy: standard security headers attached, even on errors.
         let policy = ResponsePolicy {
             security_headers: true,
+            ..ResponsePolicy::default()
         };
         let mut secured = Connection::with_policy(policy);
         secured.feed(b"GET / HTTP/2.0\r\n\r\n"); // a 505 error path
@@ -307,5 +362,59 @@ mod tests {
         req.extend_from_slice(b"\r\n");
         conn.feed(&req);
         assert!(wire(&conn.step(&router(), 0)).starts_with("HTTP/1.1 431 "));
+    }
+
+    #[test]
+    fn expect_100_continue_is_interim_then_dispatches() {
+        // RFC 9110 10.1.1: the head with Expect: 100-continue must draw an interim
+        // 100 (connection stays open), exactly once, before the body arrives; the
+        // body then produces the final response.
+        let mut conn = Connection::new();
+        conn.feed(
+            b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nExpect: 100-continue\r\n\r\n",
+        );
+        let interim = conn.step(&router(), 0);
+        match &interim {
+            Step::Write { close, .. } => {
+                assert!(!close, "100 Continue must keep the connection open")
+            }
+            Step::NeedMore => panic!("expected an interim 100"),
+        }
+        assert_eq!(wire(&interim), "HTTP/1.1 100 Continue\r\n\r\n");
+        // No duplicate 100 while still waiting for the body.
+        assert_eq!(conn.step(&router(), 0), Step::NeedMore);
+        // The body arrives -> the final response is produced.
+        conn.feed(b"abc");
+        assert!(matches!(conn.step(&router(), 0), Step::Write { .. }));
+    }
+
+    #[test]
+    fn clockless_server_omits_date() {
+        // RFC 9110 6.6.1: a server without a real clock must not emit Date, even
+        // though it still sends Connection.
+        let mut conn = Connection::new().clock(false);
+        conn.feed(b"GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
+        let text = wire(&conn.step(&router(), 0));
+        assert!(
+            !text.contains("Date:"),
+            "clockless server must not send Date"
+        );
+        assert!(text.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn unsupported_expectation_yields_417() {
+        // An expectation the server cannot meet is refused with 417, not silently
+        // ignored (RFC 9110 10.1.1).
+        let mut conn = Connection::new();
+        conn.feed(
+            b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nExpect: the-impossible\r\n\r\n",
+        );
+        let step = conn.step(&router(), 0);
+        assert!(wire(&step).starts_with("HTTP/1.1 417 "));
+        match step {
+            Step::Write { close, .. } => assert!(close),
+            Step::NeedMore => panic!("expected a 417"),
+        }
     }
 }

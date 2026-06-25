@@ -7,6 +7,7 @@ use core::fmt;
 pub struct StatusCode(u16);
 
 impl StatusCode {
+    pub const CONTINUE: StatusCode = StatusCode(100);
     pub const OK: StatusCode = StatusCode(200);
     pub const CREATED: StatusCode = StatusCode(201);
     pub const NO_CONTENT: StatusCode = StatusCode(204);
@@ -21,6 +22,7 @@ impl StatusCode {
     pub const URI_TOO_LONG: StatusCode = StatusCode(414);
     pub const UNSUPPORTED_MEDIA_TYPE: StatusCode = StatusCode(415);
     pub const RANGE_NOT_SATISFIABLE: StatusCode = StatusCode(416);
+    pub const EXPECTATION_FAILED: StatusCode = StatusCode(417);
     pub const IM_A_TEAPOT: StatusCode = StatusCode(418);
     pub const TOO_MANY_REQUESTS: StatusCode = StatusCode(429);
     pub const REQUEST_HEADER_FIELDS_TOO_LARGE: StatusCode = StatusCode(431);
@@ -41,6 +43,7 @@ impl StatusCode {
     /// The reason phrase, or an empty string for codes ferro does not name.
     pub fn reason(&self) -> &'static str {
         match self.0 {
+            100 => "Continue",
             200 => "OK",
             201 => "Created",
             204 => "No Content",
@@ -55,6 +58,7 @@ impl StatusCode {
             414 => "URI Too Long",
             415 => "Unsupported Media Type",
             416 => "Range Not Satisfiable",
+            417 => "Expectation Failed",
             418 => "I'm a teapot",
             429 => "Too Many Requests",
             431 => "Request Header Fields Too Large",

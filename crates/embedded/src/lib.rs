@@ -74,21 +74,29 @@ pub struct ConnState {
     conn: Connection,
     out: Vec<u8>,
     close: bool,
+    has_clock: bool,
 }
 
 impl ConnState {
-    /// Creates fresh per-socket state with the default connection policy.
+    /// Creates fresh per-socket state for a server with a real clock.
     pub fn new() -> ConnState {
+        ConnState::with_clock(true)
+    }
+
+    /// Creates fresh per-socket state. Pass `has_clock = false` on a board
+    /// without an RTC so responses omit the `Date` header (RFC 9110 6.6.1).
+    pub fn with_clock(has_clock: bool) -> ConnState {
         ConnState {
-            conn: Connection::new(),
+            conn: Connection::new().clock(has_clock),
             out: Vec::new(),
             close: false,
+            has_clock,
         }
     }
 
     /// Clears all state for reuse by the next client on the same socket.
     fn reset(&mut self) {
-        self.conn = Connection::new();
+        self.conn = Connection::new().clock(self.has_clock);
         self.out.clear();
         self.close = false;
     }

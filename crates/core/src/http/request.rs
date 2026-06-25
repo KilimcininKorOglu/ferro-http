@@ -21,6 +21,9 @@ pub const MAX_HEADERS: usize = 64;
 pub const MAX_TARGET_BYTES: usize = 4 * 1024;
 /// Maximum size of a request body framed by `Content-Length`.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Maximum length of a single chunk-size or trailer line, bounding how much an
+/// unterminated chunked framing line may buffer before it is rejected.
+const MAX_CHUNK_LINE_BYTES: usize = 8 * 1024;
 
 /// The HTTP protocol version of a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +235,62 @@ pub fn parse_with(buf: &[u8], max_body: usize) -> Result<Parsed, ParseError> {
     })
 }
 
+/// What an `Expect` header requires of the server before the body is read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExpectAction {
+    /// No complete head yet, or the head carries no `Expect` field.
+    None,
+    /// `Expect: 100-continue`: the server should send an interim 100 Continue.
+    Continue,
+    /// An expectation the server does not support: respond 417.
+    Unsupported,
+}
+
+/// Inspects a (possibly head-complete) buffer for an `Expect` header, so the
+/// connection can answer 100-continue or 417 before the body arrives (RFC 9110
+/// 10.1.1). Returns [`ExpectAction::None`] until the head is complete.
+pub fn expect_action(buf: &[u8]) -> ExpectAction {
+    let head_end = match find_subslice(buf, b"\r\n\r\n") {
+        Some(i) => i,
+        None => return ExpectAction::None,
+    };
+    let mut lines = split_crlf(&buf[..head_end]);
+    let _request_line = lines.next();
+    for line in lines {
+        let colon = match line.iter().position(|&b| b == b':') {
+            Some(i) => i,
+            None => continue,
+        };
+        if line[..colon].eq_ignore_ascii_case(b"expect") {
+            return if trim_ows(&line[colon + 1..]).eq_ignore_ascii_case(b"100-continue") {
+                ExpectAction::Continue
+            } else {
+                ExpectAction::Unsupported
+            };
+        }
+    }
+    ExpectAction::None
+}
+
+/// Trims leading and trailing optional whitespace (SP/HTAB) from a byte slice.
+fn trim_ows(mut bytes: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = bytes {
+        if *first == b' ' || *first == b'\t' {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    while let [rest @ .., last] = bytes {
+        if *last == b' ' || *last == b'\t' {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
 fn parse_request_line(line: &[u8]) -> Result<(Method, String, Version), ParseError> {
     let mut parts = line.splitn(3, |&b| b == b' ');
     let method_tok = parts.next().ok_or(ParseError::MalformedRequestLine)?;
@@ -440,7 +499,13 @@ fn decode_chunked(buf: &[u8], max_body: usize) -> Result<ChunkOutcome, ParseErro
     loop {
         let line_len = match find_subslice(&buf[pos..], b"\r\n") {
             Some(i) => i,
-            None => return Ok(ChunkOutcome::Partial),
+            None => {
+                // An unterminated size line must not buffer without bound.
+                if buf.len() - pos > MAX_CHUNK_LINE_BYTES {
+                    return Err(ParseError::MalformedChunk);
+                }
+                return Ok(ChunkOutcome::Partial);
+            }
         };
         let size_line = &buf[pos..pos + line_len];
         // Drop any chunk extensions following a ';'.
@@ -457,7 +522,13 @@ fn decode_chunked(buf: &[u8], max_body: usize) -> Result<ChunkOutcome, ParseErro
             loop {
                 let trailer_len = match find_subslice(&buf[tpos..], b"\r\n") {
                     Some(i) => i,
-                    None => return Ok(ChunkOutcome::Partial),
+                    None => {
+                        // An unterminated trailer line is bounded the same way.
+                        if buf.len() - tpos > MAX_CHUNK_LINE_BYTES {
+                            return Err(ParseError::MalformedChunk);
+                        }
+                        return Ok(ChunkOutcome::Partial);
+                    }
                 };
                 if trailer_len == 0 {
                     return Ok(ChunkOutcome::Complete {

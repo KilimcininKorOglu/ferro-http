@@ -101,10 +101,13 @@ fn main() -> ! {
     let rx = tcp::SocketBuffer::new(vec![0; 1500]);
     let tx = tcp::SocketBuffer::new(vec![0; 1500]);
     let handle = sockets.add(tcp::Socket::new(rx, tx));
-    let mut server = [(handle, ConnState::new())];
+    // This placeholder drives time from a monotonic tick, not a wall clock, so
+    // it is clockless for HTTP purposes and must not emit Date (RFC 9110 6.6.1).
+    // A real board with an RTC would use `ConnState::new()`.
+    let mut server = [(handle, ConnState::with_clock(false))];
 
-    // A monotonic tick advances smoltcp and stamps responses; a real board would
-    // source wall-clock time from its RTC.
+    // A monotonic tick advances smoltcp; a real board would source wall-clock
+    // time from its RTC and report it as the Unix seconds below.
     let mut tick: i64 = 0;
     serve_smoltcp(
         &mut iface,
