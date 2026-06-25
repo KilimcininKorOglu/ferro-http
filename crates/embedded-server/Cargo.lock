@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "embedded-server"
-version = "0.0.1"
+version = "1.0.1"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
@@ -164,11 +164,11 @@ dependencies = [
 
 [[package]]
 name = "ferro-core"
-version = "0.0.1"
+version = "1.0.1"
 
 [[package]]
 name = "ferro-embedded"
-version = "0.0.1"
+version = "1.0.1"
 dependencies = [
  "ferro-core",
  "smoltcp",
