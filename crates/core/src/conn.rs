@@ -356,7 +356,7 @@ mod tests {
         // An over-limit header block is 431 (RFC 6585), not a generic 400.
         let mut conn = Connection::new();
         let mut req = Vec::from(&b"GET / HTTP/1.1\r\nHost: h\r\n"[..]);
-        while req.len() <= 8 * 1024 {
+        while req.len() <= 16 * 1024 {
             req.extend_from_slice(b"X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
         }
         req.extend_from_slice(b"\r\n");

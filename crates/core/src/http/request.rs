@@ -12,13 +12,14 @@ use core::fmt;
 
 use crate::http::method::Method;
 
-/// Maximum size of the request line plus header block.
-pub const MAX_HEAD_BYTES: usize = 8 * 1024;
+/// Maximum size of the request line plus header block. Kept above
+/// [`MAX_TARGET_BYTES`] so an over-long target surfaces as 414 (URI Too Long)
+/// rather than tripping the whole-head limit first.
+pub const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// Maximum number of header fields.
 pub const MAX_HEADERS: usize = 64;
-/// Maximum size of the request target (URI). Kept below [`MAX_HEAD_BYTES`] so an
-/// over-long target surfaces as 414 (URI Too Long) before the whole-head limit.
-pub const MAX_TARGET_BYTES: usize = 4 * 1024;
+/// Maximum size of the request target (URI).
+pub const MAX_TARGET_BYTES: usize = 8 * 1024;
 /// Maximum size of a request body framed by `Content-Length`.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Maximum length of a single chunk-size or trailer line, bounding how much an
