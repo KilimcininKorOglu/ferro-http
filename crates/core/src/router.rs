@@ -95,6 +95,18 @@ impl Router {
         }
         methods
     }
+
+    /// Returns the distinct methods registered across all routes, in registration
+    /// order. Used to advertise server-wide capability for `OPTIONS *`.
+    pub fn registered_methods(&self) -> Vec<Method> {
+        let mut methods: Vec<Method> = Vec::new();
+        for route in &self.routes {
+            if !methods.contains(&route.method) {
+                methods.push(route.method);
+            }
+        }
+        methods
+    }
 }
 
 /// Whether a route registered for `route_method` answers a `request_method`
@@ -245,5 +257,19 @@ mod tests {
         assert!(allowed.contains(&Method::Get));
         assert!(allowed.contains(&Method::Query));
         assert!(r.allowed_methods("/nope").is_empty());
+    }
+
+    #[test]
+    fn registered_methods_lists_distinct_methods() {
+        // Server-wide OPTIONS advertises every method the router can serve, once
+        // each, regardless of path.
+        let mut r = Router::new();
+        r.route(Method::Get, "/a", users);
+        r.route(Method::Query, "/b", users);
+        r.route(Method::Get, "/c", users);
+        let methods = r.registered_methods();
+        assert_eq!(methods.len(), 2);
+        assert!(methods.contains(&Method::Get));
+        assert!(methods.contains(&Method::Query));
     }
 }

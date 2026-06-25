@@ -55,6 +55,17 @@ impl App {
     /// API routes first, then static files (GET/HEAD), then method-aware
     /// discovery (OPTIONS / 405 + `Allow`) for known router paths, then 404.
     fn dispatch(&self, request: &Request) -> Response {
+        // Server-wide OPTIONS (asterisk-form) advertises overall capability
+        // (RFC 9110 9.3.7), independent of any specific resource. Static serving
+        // always provides GET/HEAD, so seed the set with GET.
+        if request.method == Method::Options && request.target == "*" {
+            let mut methods = self.router.registered_methods();
+            if !methods.contains(&Method::Get) {
+                methods.push(Method::Get);
+            }
+            return Response::new(StatusCode::OK)
+                .with_header("Allow", &allow_header_value(&methods));
+        }
         if let Some(response) = self.router.dispatch(request) {
             return response;
         }
