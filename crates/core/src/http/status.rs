@@ -17,6 +17,7 @@ impl StatusCode {
     pub const METHOD_NOT_ALLOWED: StatusCode = StatusCode(405);
     pub const PAYLOAD_TOO_LARGE: StatusCode = StatusCode(413);
     pub const URI_TOO_LONG: StatusCode = StatusCode(414);
+    pub const UNSUPPORTED_MEDIA_TYPE: StatusCode = StatusCode(415);
     pub const IM_A_TEAPOT: StatusCode = StatusCode(418);
     pub const TOO_MANY_REQUESTS: StatusCode = StatusCode(429);
     pub const INTERNAL_SERVER_ERROR: StatusCode = StatusCode(500);
@@ -46,6 +47,7 @@ impl StatusCode {
             405 => "Method Not Allowed",
             413 => "Payload Too Large",
             414 => "URI Too Long",
+            415 => "Unsupported Media Type",
             418 => "I'm a teapot",
             429 => "Too Many Requests",
             500 => "Internal Server Error",
@@ -73,6 +75,11 @@ mod tests {
         assert_eq!(StatusCode::IM_A_TEAPOT.reason(), "I'm a teapot");
         assert_eq!(StatusCode::UNAUTHORIZED.code(), 401);
         assert_eq!(StatusCode::UNAUTHORIZED.reason(), "Unauthorized");
+        assert_eq!(StatusCode::UNSUPPORTED_MEDIA_TYPE.code(), 415);
+        assert_eq!(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE.reason(),
+            "Unsupported Media Type"
+        );
     }
 
     #[test]

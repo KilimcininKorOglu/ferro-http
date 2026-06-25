@@ -14,6 +14,9 @@ pub enum Method {
     Options,
     Connect,
     Trace,
+    /// The HTTP QUERY method (RFC 10008): a safe, idempotent request whose
+    /// content describes a query to run against the target resource.
+    Query,
 }
 
 impl Method {
@@ -29,6 +32,7 @@ impl Method {
             b"OPTIONS" => Method::Options,
             b"CONNECT" => Method::Connect,
             b"TRACE" => Method::Trace,
+            b"QUERY" => Method::Query,
             _ => return None,
         })
     }
@@ -45,6 +49,7 @@ impl Method {
             Method::Options => "OPTIONS",
             Method::Connect => "CONNECT",
             Method::Trace => "TRACE",
+            Method::Query => "QUERY",
         }
     }
 
@@ -68,6 +73,9 @@ mod tests {
     fn parses_known_methods() {
         assert_eq!(Method::from_bytes(b"GET"), Some(Method::Get));
         assert_eq!(Method::from_bytes(b"DELETE"), Some(Method::Delete));
+        // QUERY (RFC 10008) is a recognized method and round-trips its token.
+        assert_eq!(Method::from_bytes(b"QUERY"), Some(Method::Query));
+        assert_eq!(Method::Query.as_str(), "QUERY");
     }
 
     #[test]

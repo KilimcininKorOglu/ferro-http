@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferro_core::config::{Config, ConfigSource};
+use ferro_core::handler::query::query_content_type_check;
 use ferro_core::http::method::Method;
 use ferro_core::http::request::Request;
 use ferro_core::http::response::Response;
@@ -34,12 +35,33 @@ fn health(_request: &Request, _params: &Params) -> Response {
     Response::json(StatusCode::OK, "{\"status\":\"ok\"}")
 }
 
+/// Media types the demo QUERY endpoint accepts.
+const SEARCH_QUERY_TYPES: &[&str] = &["application/x-www-form-urlencoded"];
+
+/// Demo QUERY endpoint (RFC 10008), showing a safe, idempotent server-side query
+/// alongside the GET API. It validates the query media type, processes the
+/// request content, and advertises the accepted format via `Accept-Query`.
+fn search(request: &Request, _params: &Params) -> Response {
+    if let Err(response) = query_content_type_check(request, SEARCH_QUERY_TYPES) {
+        return response;
+    }
+    // Process the query content. This demo reports the size of the received
+    // query rather than echoing user input back into the response.
+    let body = format!(
+        "{{\"received_bytes\":{},\"results\":[]}}",
+        request.body.len()
+    );
+    Response::json(StatusCode::OK, &body)
+        .with_header("Accept-Query", "application/x-www-form-urlencoded")
+}
+
 /// Builds the application handler from a configuration. Used at startup and on
 /// every admin hot-reload, so it reconstructs everything config-derived and
 /// re-registers the API routes.
 fn build_app(config: &Config) -> App {
     let mut router = Router::new();
     router.route(Method::Get, "/api/health", health);
+    router.route(Method::Query, "/api/search", search);
 
     let rate_limiter = config
         .security

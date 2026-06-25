@@ -481,6 +481,20 @@ mod tests {
     }
 
     #[test]
+    fn query_request_carries_content_and_type() {
+        // RFC 10008 QUERY frames its body like any other method: body reading is
+        // driven by Content-Length, not the verb, so the query content arrives intact.
+        let raw =
+            b"QUERY /search HTTP/1.1\r\nContent-Type: application/sql\r\nContent-Length: 11\r\n\r\nSELECT name";
+        let (req, consumed) = complete(raw);
+        assert_eq!(req.method, Method::Query);
+        assert_eq!(req.path(), "/search");
+        assert_eq!(req.header("content-type"), Some("application/sql"));
+        assert_eq!(req.body, b"SELECT name");
+        assert_eq!(consumed, raw.len());
+    }
+
+    #[test]
     fn partial_when_body_incomplete() {
         // Head complete, but the declared body has not fully arrived yet.
         assert!(matches!(
