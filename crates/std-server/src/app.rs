@@ -52,7 +52,8 @@ impl App {
         }
     }
 
-    /// API routes first, then static files (GET/HEAD), then 404.
+    /// API routes first, then static files (GET/HEAD), then method-aware
+    /// discovery (OPTIONS / 405 + `Allow`) for known router paths, then 404.
     fn dispatch(&self, request: &Request) -> Response {
         if let Some(response) = self.router.dispatch(request) {
             return response;
@@ -66,6 +67,19 @@ impl App {
             ) {
                 return response;
             }
+        }
+        // The path is a known router resource but the method did not match:
+        // answer OPTIONS with its methods and reject the rest with 405 + Allow
+        // (RFC 9110 Section 15.5.6; QUERY discovery per RFC 10008 Appendix A.2).
+        // Static-only paths are not router resources and fall through to 404.
+        let allowed = self.router.allowed_methods(request.path());
+        if !allowed.is_empty() {
+            let allow = allow_header_value(&allowed);
+            if request.method == Method::Options {
+                return Response::new(StatusCode::OK).with_header("Allow", &allow);
+            }
+            return Response::text(StatusCode::METHOD_NOT_ALLOWED, "405 Method Not Allowed")
+                .with_header("Allow", &allow);
         }
         Response::text(StatusCode::NOT_FOUND, "404 Not Found")
     }
@@ -171,4 +185,51 @@ fn header_value<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
 #[cfg(feature = "gzip")]
 fn has_header(response: &Response, name: &str) -> bool {
     header_value(response, name).is_some()
+}
+
+/// Builds an `Allow` header value from the methods registered for a path: the
+/// registered methods, plus HEAD wherever GET is supported and OPTIONS (both
+/// answerable here). Order is not significant (RFC 9110, Section 10.2.1).
+fn allow_header_value(allowed: &[Method]) -> String {
+    let mut methods: Vec<Method> = allowed.to_vec();
+    if methods.contains(&Method::Get) && !methods.contains(&Method::Head) {
+        methods.push(Method::Head);
+    }
+    if !methods.contains(&Method::Options) {
+        methods.push(Method::Options);
+    }
+    let mut value = String::new();
+    for (i, method) in methods.iter().enumerate() {
+        if i > 0 {
+            value.push_str(", ");
+        }
+        value.push_str(method.as_str());
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_header_synthesizes_head_and_options_for_get() {
+        // A GET resource also answers HEAD and OPTIONS, so Allow must list them
+        // even though only GET was registered; otherwise discovery understates
+        // what the server actually serves.
+        let allow = allow_header_value(&[Method::Get]);
+        for method in ["GET", "HEAD", "OPTIONS"] {
+            assert!(allow.contains(method), "Allow {allow:?} missing {method}");
+        }
+    }
+
+    #[test]
+    fn allow_header_omits_head_without_get() {
+        // A QUERY-only resource does not answer HEAD; advertising it would claim
+        // a method the server would reject.
+        let allow = allow_header_value(&[Method::Query]);
+        assert!(allow.contains("QUERY"));
+        assert!(allow.contains("OPTIONS"));
+        assert!(!allow.contains("HEAD"));
+    }
 }

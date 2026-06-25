@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Support for the HTTP QUERY method (RFC 10008): a safe, idempotent request
+  whose content describes a server-side query. A `query_content_type_check`
+  helper enforces the media type (400 when absent, 415 with an `Accept-Query`
+  field when unsupported), and a demo `QUERY /api/search` endpoint shows the
+  flow alongside the GET API.
+- Method-aware discovery for router resources: `OPTIONS` returns the resource's
+  `Allow` set and an unsupported method returns `405 Method Not Allowed` with
+  `Allow`, instead of `404`. Static paths remain GET/HEAD-only.
+
+### Fixed
+- A HEAD request to a GET API route is now served (its body dropped at
+  serialization) instead of falling through to a 404.
+
 ## [1.0.1] - 2026-06-23
 
 ### Added

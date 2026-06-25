@@ -67,11 +67,12 @@ impl Router {
     }
 
     /// Finds the first matching route and runs its handler, or returns `None`
-    /// when no route matches (the caller then produces a 404).
+    /// when no route matches (the caller then produces a 404). A HEAD request is
+    /// answered by a matching GET route (its body is dropped at serialization).
     pub fn dispatch(&self, request: &Request) -> Option<Response> {
         let path = request.path();
         for route in &self.routes {
-            if route.method != request.method {
+            if !method_matches(route.method, request.method) {
                 continue;
             }
             if let Some(params) = match_segments(&route.segments, path) {
@@ -80,6 +81,28 @@ impl Router {
         }
         None
     }
+
+    /// Returns the methods registered for routes whose pattern matches `path`,
+    /// in registration order and de-duplicated. The list is empty when no route
+    /// matches the path (i.e. the path is not a router resource). Callers use it
+    /// to build an `Allow` header and to answer OPTIONS or 405 for known paths.
+    pub fn allowed_methods(&self, path: &str) -> Vec<Method> {
+        let mut methods: Vec<Method> = Vec::new();
+        for route in &self.routes {
+            if match_segments(&route.segments, path).is_some() && !methods.contains(&route.method) {
+                methods.push(route.method);
+            }
+        }
+        methods
+    }
+}
+
+/// Whether a route registered for `route_method` answers a `request_method`
+/// request. HEAD is answered by a GET route, since HEAD is GET without a body
+/// (RFC 9110, Section 9.3.2); the body is dropped at serialization time.
+fn method_matches(route_method: Method, request_method: Method) -> bool {
+    route_method == request_method
+        || (request_method == Method::Head && route_method == Method::Get)
 }
 
 impl Service for Router {
@@ -199,5 +222,28 @@ mod tests {
         assert!(router()
             .dispatch(&make_request(Method::Post, "/api/users"))
             .is_none());
+    }
+
+    #[test]
+    fn head_is_answered_by_a_get_route() {
+        // HEAD must reach a GET handler (the body is dropped at serialization),
+        // otherwise HEAD on an API resource would wrongly 404.
+        let resp = router()
+            .dispatch(&make_request(Method::Head, "/api/users"))
+            .expect("HEAD should be served by the GET route");
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn allowed_methods_lists_registered_methods_for_a_path() {
+        // A path registered under several methods must report all of them so the
+        // caller can build a truthful Allow header; an unknown path reports none.
+        let mut r = router();
+        r.route(Method::Query, "/api/users", users);
+        let allowed = r.allowed_methods("/api/users");
+        assert_eq!(allowed.len(), 2);
+        assert!(allowed.contains(&Method::Get));
+        assert!(allowed.contains(&Method::Query));
+        assert!(r.allowed_methods("/nope").is_empty());
     }
 }
