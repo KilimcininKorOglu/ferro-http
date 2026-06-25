@@ -16,8 +16,9 @@ use crate::http::method::Method;
 pub const MAX_HEAD_BYTES: usize = 8 * 1024;
 /// Maximum number of header fields.
 pub const MAX_HEADERS: usize = 64;
-/// Maximum size of the request target (URI).
-pub const MAX_TARGET_BYTES: usize = 8 * 1024;
+/// Maximum size of the request target (URI). Kept below [`MAX_HEAD_BYTES`] so an
+/// over-long target surfaces as 414 (URI Too Long) before the whole-head limit.
+pub const MAX_TARGET_BYTES: usize = 4 * 1024;
 /// Maximum size of a request body framed by `Content-Length`.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 
@@ -82,6 +83,10 @@ pub enum ParseError {
     UnknownMethod,
     TargetTooLong,
     UnsupportedVersion,
+    /// A bare CR (not part of a CRLF) in the request head (RFC 9112 2.2).
+    BareCr,
+    /// A missing, duplicated, or invalid `Host` field (RFC 9112 3.2).
+    BadHost,
     MalformedHeader,
     BadContentLength,
     /// Both `Content-Length` and `Transfer-Encoding` present (request smuggling).
@@ -102,6 +107,8 @@ impl fmt::Display for ParseError {
             ParseError::UnknownMethod => "unknown method",
             ParseError::TargetTooLong => "request target too long",
             ParseError::UnsupportedVersion => "unsupported HTTP version",
+            ParseError::BareCr => "bare CR in request head",
+            ParseError::BadHost => "missing or invalid Host header",
             ParseError::MalformedHeader => "malformed header",
             ParseError::BadContentLength => "invalid Content-Length",
             ParseError::ConflictingFraming => "conflicting Content-Length and Transfer-Encoding",
@@ -143,6 +150,12 @@ pub fn parse_with(buf: &[u8], max_body: usize) -> Result<Parsed, ParseError> {
         return Err(ParseError::HeadTooLarge);
     }
 
+    // Every CR in the head must be part of a CRLF; a bare CR is a smuggling and
+    // response-splitting vector and MUST be rejected (RFC 9112 2.2).
+    if has_bare_cr(&buf[..head_end]) {
+        return Err(ParseError::BareCr);
+    }
+
     // Request line + header fields, without the terminating blank line.
     let mut lines = split_crlf(&buf[..head_end - 4]);
     let request_line = lines.next().ok_or(ParseError::MalformedRequestLine)?;
@@ -160,6 +173,8 @@ pub fn parse_with(buf: &[u8], max_body: usize) -> Result<Parsed, ParseError> {
         let (name, value) = parse_header_line(line)?;
         headers.push(Header { name, value });
     }
+
+    validate_host(&headers, version)?;
 
     let (body, consumed) = match body_framing(&headers)? {
         Framing::Fixed(len) => {
@@ -202,7 +217,16 @@ fn parse_request_line(line: &[u8]) -> Result<(Method, String, Version), ParseErr
         return Err(ParseError::MalformedRequestLine);
     }
 
-    let method = Method::from_bytes(method_tok).ok_or(ParseError::UnknownMethod)?;
+    let method = match Method::from_bytes(method_tok) {
+        Some(m) => m,
+        // A syntactically valid but unrecognized method token is "not
+        // implemented" (501); a token with non-token bytes is a malformed
+        // request line (400).
+        None if !method_tok.is_empty() && method_tok.iter().all(|&b| is_token_byte(b)) => {
+            return Err(ParseError::UnknownMethod);
+        }
+        None => return Err(ParseError::MalformedRequestLine),
+    };
 
     if target_tok.len() > MAX_TARGET_BYTES {
         return Err(ParseError::TargetTooLong);
@@ -212,13 +236,84 @@ fn parse_request_line(line: &[u8]) -> Result<(Method, String, Version), ParseErr
         return Err(ParseError::MalformedRequestLine);
     }
 
-    let version = match version_tok {
-        b"HTTP/1.1" => Version::Http11,
-        b"HTTP/1.0" => Version::Http10,
-        _ => return Err(ParseError::UnsupportedVersion),
-    };
+    let version = parse_version(version_tok)?;
 
     Ok((method, target.to_string(), version))
+}
+
+/// Parses the `HTTP/<major>.<minor>` version token. A request with a supported
+/// major (1) is served as our highest supported minor: `HTTP/1.0` keeps its
+/// close-by-default semantics, and any higher 1.x minor is treated as 1.1 (RFC
+/// 9110 6.2 / RFC 9112 2.3). A different major is unsupported (505); a token
+/// that is not `HTTP/<digits>.<digits>` is a malformed request line (400).
+fn parse_version(tok: &[u8]) -> Result<Version, ParseError> {
+    let rest = tok
+        .strip_prefix(b"HTTP/")
+        .ok_or(ParseError::MalformedRequestLine)?;
+    let dot = rest
+        .iter()
+        .position(|&b| b == b'.')
+        .ok_or(ParseError::MalformedRequestLine)?;
+    let (major, minor) = (&rest[..dot], &rest[dot + 1..]);
+    if major.is_empty()
+        || minor.is_empty()
+        || !major.iter().all(u8::is_ascii_digit)
+        || !minor.iter().all(u8::is_ascii_digit)
+    {
+        return Err(ParseError::MalformedRequestLine);
+    }
+    if ascii_to_u32_saturating(major) != 1 {
+        return Err(ParseError::UnsupportedVersion);
+    }
+    if ascii_to_u32_saturating(minor) == 0 {
+        Ok(Version::Http10)
+    } else {
+        Ok(Version::Http11)
+    }
+}
+
+/// Parses an all-ASCII-digit slice to a `u32`, saturating on overflow (callers
+/// have already validated the bytes are digits).
+fn ascii_to_u32_saturating(bytes: &[u8]) -> u32 {
+    let mut value: u32 = 0;
+    for &b in bytes {
+        value = value.saturating_mul(10).saturating_add((b - b'0') as u32);
+    }
+    value
+}
+
+/// True if the request head contains a CR (0x0D) not immediately followed by an
+/// LF (0x0A). Every legitimate CR in the head is part of a CRLF terminator.
+fn has_bare_cr(head: &[u8]) -> bool {
+    head.iter()
+        .enumerate()
+        .any(|(i, &b)| b == b'\r' && head.get(i + 1) != Some(&b'\n'))
+}
+
+/// Enforces the RFC 9112 3.2 Host requirement: an HTTP/1.1 request MUST carry
+/// exactly one Host field with a valid value. More than one Host (any version)
+/// is rejected as a request-smuggling vector; a missing Host fails only for
+/// HTTP/1.1, since HTTP/1.0 did not require it.
+fn validate_host(headers: &[Header], version: Version) -> Result<(), ParseError> {
+    let mut hosts = headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("host"));
+    let first = hosts.next();
+    if hosts.next().is_some() {
+        return Err(ParseError::BadHost);
+    }
+    match first {
+        Some(h) if !is_valid_host_value(&h.value) => Err(ParseError::BadHost),
+        Some(_) => Ok(()),
+        None if version == Version::Http11 => Err(ParseError::BadHost),
+        None => Ok(()),
+    }
+}
+
+/// A pragmatic Host validity check: non-empty and free of whitespace and control
+/// bytes (a full uri-host grammar is unnecessary to reject smuggling payloads).
+fn is_valid_host_value(host: &str) -> bool {
+    !host.is_empty() && !host.bytes().any(|b| b <= b' ' || b == 0x7f)
 }
 
 fn parse_header_line(line: &[u8]) -> Result<(String, String), ParseError> {
@@ -453,7 +548,7 @@ mod tests {
 
     #[test]
     fn path_strips_query_string() {
-        let (req, _) = complete(b"GET /search?q=rust HTTP/1.1\r\n\r\n");
+        let (req, _) = complete(b"GET /search?q=rust HTTP/1.1\r\nHost: h\r\n\r\n");
         assert_eq!(req.path(), "/search");
         assert_eq!(req.target, "/search?q=rust");
     }
@@ -461,9 +556,9 @@ mod tests {
     #[test]
     fn keep_alive_follows_version_and_header() {
         // HTTP/1.1 defaults to keep-alive; an explicit close overrides it.
-        let (a, _) = complete(b"GET / HTTP/1.1\r\n\r\n");
+        let (a, _) = complete(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n");
         assert!(a.keep_alive());
-        let (b, _) = complete(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+        let (b, _) = complete(b"GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
         assert!(!b.keep_alive());
         // HTTP/1.0 defaults to close unless it asks to keep alive.
         let (c, _) = complete(b"GET / HTTP/1.0\r\n\r\n");
@@ -474,7 +569,7 @@ mod tests {
 
     #[test]
     fn body_framed_by_content_length() {
-        let raw = b"POST /f HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let raw = b"POST /f HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello";
         let (req, consumed) = complete(raw);
         assert_eq!(req.body, b"hello");
         assert_eq!(consumed, raw.len());
@@ -485,7 +580,7 @@ mod tests {
         // RFC 10008 QUERY frames its body like any other method: body reading is
         // driven by Content-Length, not the verb, so the query content arrives intact.
         let raw =
-            b"QUERY /search HTTP/1.1\r\nContent-Type: application/sql\r\nContent-Length: 11\r\n\r\nSELECT name";
+            b"QUERY /search HTTP/1.1\r\nHost: h\r\nContent-Type: application/sql\r\nContent-Length: 11\r\n\r\nSELECT name";
         let (req, consumed) = complete(raw);
         assert_eq!(req.method, Method::Query);
         assert_eq!(req.path(), "/search");
@@ -498,7 +593,7 @@ mod tests {
     fn partial_when_body_incomplete() {
         // Head complete, but the declared body has not fully arrived yet.
         assert!(matches!(
-            parse(b"POST /f HTTP/1.1\r\nContent-Length: 5\r\n\r\nhel").unwrap(),
+            parse(b"POST /f HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhel").unwrap(),
             Parsed::Partial
         ));
     }
@@ -523,14 +618,14 @@ mod tests {
     fn rejects_smuggling_framing() {
         // Both framing headers together is the classic request-smuggling vector.
         let raw =
-            b"POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello";
+            b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello";
         assert_eq!(parse(raw), Err(ParseError::ConflictingFraming));
     }
 
     #[test]
     fn decodes_chunked_body() {
         // "Wikipedia" in two chunks, then the terminating zero chunk.
-        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+        let raw = b"POST /f HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n\
                     4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
         let (req, consumed) = complete(raw);
         assert_eq!(req.body, b"Wikipedia");
@@ -540,38 +635,38 @@ mod tests {
     #[test]
     fn chunked_body_is_partial_until_terminator() {
         // The zero chunk and final CRLF have not arrived yet.
-        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n";
+        let raw = b"POST /f HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n";
         assert!(matches!(parse(raw).unwrap(), Parsed::Partial));
     }
 
     #[test]
     fn rejects_malformed_chunk_size() {
-        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\nWiki\r\n0\r\n\r\n";
+        let raw = b"POST /f HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\nWiki\r\n0\r\n\r\n";
         assert_eq!(parse(raw), Err(ParseError::MalformedChunk));
     }
 
     #[test]
     fn rejects_non_chunked_transfer_encoding() {
-        let raw = b"POST /f HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n";
+        let raw = b"POST /f HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\n";
         assert_eq!(parse(raw), Err(ParseError::UnsupportedTransferEncoding));
     }
 
     #[test]
     fn rejects_bad_content_length() {
-        let raw = b"POST / HTTP/1.1\r\nContent-Length: 1x\r\n\r\n";
+        let raw = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1x\r\n\r\n";
         assert_eq!(parse(raw), Err(ParseError::BadContentLength));
     }
 
     #[test]
     fn rejects_duplicate_content_length() {
-        let raw = b"POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx";
+        let raw = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx";
         assert_eq!(parse(raw), Err(ParseError::BadContentLength));
     }
 
     #[test]
     fn pipelined_consumed_count_allows_next_request() {
         // Two requests back to back: the first parse consumes only its own bytes.
-        let raw = b"GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\n";
+        let raw = b"GET /a HTTP/1.1\r\nHost: h\r\n\r\nGET /b HTTP/1.1\r\nHost: h\r\n\r\n";
         let (first, consumed) = complete(raw);
         assert_eq!(first.target, "/a");
         let (second, _) = complete(&raw[consumed..]);
@@ -582,11 +677,101 @@ mod tests {
     fn body_limit_is_configurable() {
         // A 10-byte body is rejected under a 5-byte cap but accepted under a
         // higher one, so request_max_bytes can be wired from config.
-        let raw = b"POST /f HTTP/1.1\r\nContent-Length: 10\r\n\r\n0123456789";
+        let raw = b"POST /f HTTP/1.1\r\nHost: h\r\nContent-Length: 10\r\n\r\n0123456789";
         assert_eq!(parse_with(raw, 5), Err(ParseError::BodyTooLarge));
         assert!(matches!(
             parse_with(raw, 100).unwrap(),
             Parsed::Complete { .. }
         ));
+    }
+
+    #[test]
+    fn http_1_1_requires_host() {
+        // RFC 9112 3.2: an HTTP/1.1 request lacking Host MUST be rejected, since
+        // the absent authority is a routing/smuggling ambiguity.
+        assert_eq!(parse(b"GET / HTTP/1.1\r\n\r\n"), Err(ParseError::BadHost));
+    }
+
+    #[test]
+    fn http_1_0_allows_missing_host() {
+        // Host became mandatory only in HTTP/1.1, so a 1.0 request without it is valid.
+        assert!(matches!(
+            parse(b"GET / HTTP/1.0\r\n\r\n").unwrap(),
+            Parsed::Complete { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_or_invalid_host_is_rejected() {
+        // More than one Host is a smuggling vector regardless of version; a value
+        // carrying whitespace is not a valid authority.
+        assert_eq!(
+            parse(b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"),
+            Err(ParseError::BadHost)
+        );
+        assert_eq!(
+            parse(b"GET / HTTP/1.1\r\nHost: bad host\r\n\r\n"),
+            Err(ParseError::BadHost)
+        );
+    }
+
+    #[test]
+    fn bare_cr_in_head_is_rejected() {
+        // RFC 9112 2.2: a CR not part of a CRLF is a request-splitting vector.
+        assert_eq!(
+            parse(b"GET / HTTP/1.1\rHost: h\r\n\r\n"),
+            Err(ParseError::BareCr)
+        );
+    }
+
+    #[test]
+    fn unknown_method_token_distinguished_from_malformed() {
+        // A valid-but-unknown method token is "not implemented" (UnknownMethod ->
+        // 501 at the conn layer); a token with non-token bytes is a malformed
+        // request line (400). The distinction is what makes 501 vs 400 correct.
+        assert_eq!(
+            parse(b"PROPFIND / HTTP/1.1\r\nHost: h\r\n\r\n"),
+            Err(ParseError::UnknownMethod)
+        );
+        assert_eq!(
+            parse(b"G{T / HTTP/1.1\r\nHost: h\r\n\r\n"),
+            Err(ParseError::MalformedRequestLine)
+        );
+    }
+
+    #[test]
+    fn higher_http_1x_minor_is_served_as_1_1() {
+        // RFC 9110 6.2: a higher 1.x minor is served as our highest supported minor.
+        let (req, _) = complete(b"GET / HTTP/1.2\r\nHost: h\r\n\r\n");
+        assert_eq!(req.version, Version::Http11);
+    }
+
+    #[test]
+    fn unsupported_major_versus_malformed_version() {
+        // A different major is unsupported (505); a token that is not
+        // HTTP/<digits>.<digits> is a malformed request line (400), not 505.
+        assert_eq!(
+            parse(b"GET / HTTP/2.0\r\nHost: h\r\n\r\n"),
+            Err(ParseError::UnsupportedVersion)
+        );
+        assert_eq!(
+            parse(b"GET / HTTP/1\r\nHost: h\r\n\r\n"),
+            Err(ParseError::MalformedRequestLine)
+        );
+        assert_eq!(
+            parse(b"GET / HTTPS/1.1\r\nHost: h\r\n\r\n"),
+            Err(ParseError::MalformedRequestLine)
+        );
+    }
+
+    #[test]
+    fn over_long_target_is_target_too_long() {
+        // A target above MAX_TARGET_BYTES but within the head limit must surface as
+        // 414 (TargetTooLong), not be swallowed by the whole-head 431 path.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"GET /");
+        raw.extend(core::iter::repeat(b'a').take(MAX_TARGET_BYTES));
+        raw.extend_from_slice(b" HTTP/1.1\r\nHost: h\r\n\r\n");
+        assert_eq!(parse(&raw), Err(ParseError::TargetTooLong));
     }
 }

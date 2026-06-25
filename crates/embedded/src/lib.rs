@@ -290,7 +290,7 @@ mod tests {
             let client = sockets.get_mut::<tcp::Socket>(client_handle);
             if client.can_send() && !request_sent {
                 client
-                    .send_slice(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n")
+                    .send_slice(b"GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n")
                     .expect("client send");
                 request_sent = true;
             }

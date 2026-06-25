@@ -105,21 +105,30 @@ mod tests {
 
     #[test]
     fn router_takes_precedence() {
-        let wire = serve(&app(), b"GET /ping HTTP/1.1\r\nConnection: close\r\n\r\n");
+        let wire = serve(
+            &app(),
+            b"GET /ping HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        );
         assert!(wire.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(wire.ends_with("pong"));
     }
 
     #[test]
     fn static_asset_is_a_fallback() {
-        let wire = serve(&app(), b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+        let wire = serve(
+            &app(),
+            b"GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        );
         assert!(wire.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(wire.ends_with("<h1>home</h1>"));
     }
 
     #[test]
     fn unknown_path_is_404() {
-        let wire = serve(&app(), b"GET /nope HTTP/1.1\r\nConnection: close\r\n\r\n");
+        let wire = serve(
+            &app(),
+            b"GET /nope HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        );
         assert!(wire.starts_with("HTTP/1.1 404 Not Found\r\n"));
     }
 }

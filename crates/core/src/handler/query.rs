@@ -76,7 +76,7 @@ mod tests {
         // RFC 10008 Section 2: QUERY semantics depend on the media type, so a
         // request without one cannot be interpreted and must be refused, not
         // guessed at from the body.
-        let r = req(b"QUERY /s HTTP/1.1\r\nContent-Length: 1\r\n\r\nx");
+        let r = req(b"QUERY /s HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\n\r\nx");
         let err = query_content_type_check(&r, ACCEPTED).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
@@ -86,7 +86,7 @@ mod tests {
         // A 415 must steer the client to a usable format via Accept-Query rather
         // than failing opaquely; that discovery is the point of the field.
         let r = req(
-            b"QUERY /s HTTP/1.1\r\nContent-Type: application/xml\r\nContent-Length: 1\r\n\r\nx",
+            b"QUERY /s HTTP/1.1\r\nHost: h\r\nContent-Type: application/xml\r\nContent-Length: 1\r\n\r\nx",
         );
         let err = query_content_type_check(&r, ACCEPTED).unwrap_err();
         assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
@@ -106,7 +106,7 @@ mod tests {
         // A charset parameter must not defeat the match: per RFC 10008 the bare
         // media type carries the QUERY semantics, parameters are metadata.
         let r = req(
-            b"QUERY /s HTTP/1.1\r\nContent-Type: application/sql; charset=utf-8\r\nContent-Length: 1\r\n\r\nx",
+            b"QUERY /s HTTP/1.1\r\nHost: h\r\nContent-Type: application/sql; charset=utf-8\r\nContent-Length: 1\r\n\r\nx",
         );
         assert!(query_content_type_check(&r, ACCEPTED).is_ok());
     }

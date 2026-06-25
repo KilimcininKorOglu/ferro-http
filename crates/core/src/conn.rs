@@ -160,9 +160,17 @@ fn apply_security_headers(response: Response) -> Response {
 fn error_status(err: ParseError) -> StatusCode {
     match err {
         ParseError::UnsupportedVersion => StatusCode::HTTP_VERSION_NOT_SUPPORTED,
-        ParseError::UnsupportedTransferEncoding => StatusCode::NOT_IMPLEMENTED,
+        // An unrecognized but well-formed method token is "not implemented"
+        // (RFC 9110 15.6.2), distinct from a malformed request (400).
+        ParseError::UnknownMethod | ParseError::UnsupportedTransferEncoding => {
+            StatusCode::NOT_IMPLEMENTED
+        }
         ParseError::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
         ParseError::TargetTooLong => StatusCode::URI_TOO_LONG,
+        // An oversized request head or too many fields (RFC 6585).
+        ParseError::HeadTooLarge | ParseError::TooManyHeaders => {
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        }
         _ => StatusCode::BAD_REQUEST,
     }
 }
@@ -202,7 +210,7 @@ mod tests {
     #[test]
     fn complete_request_is_dispatched() {
         let mut conn = Connection::new();
-        conn.feed(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+        conn.feed(b"GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
         let step = conn.step(&router(), 0);
         match &step {
             Step::Write { close, .. } => assert!(*close, "Connection: close must close"),
@@ -214,7 +222,7 @@ mod tests {
     #[test]
     fn keep_alive_request_does_not_close() {
         let mut conn = Connection::new();
-        conn.feed(b"GET / HTTP/1.1\r\n\r\n");
+        conn.feed(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n");
         match conn.step(&router(), 0) {
             Step::Write { close, .. } => assert!(!close, "HTTP/1.1 defaults to keep-alive"),
             Step::NeedMore => panic!("expected write"),
@@ -224,7 +232,7 @@ mod tests {
     #[test]
     fn unknown_route_yields_404() {
         let mut conn = Connection::new();
-        conn.feed(b"GET /missing HTTP/1.1\r\n\r\n");
+        conn.feed(b"GET /missing HTTP/1.1\r\nHost: h\r\n\r\n");
         assert!(wire(&conn.step(&router(), 0)).starts_with("HTTP/1.1 404 Not Found\r\n"));
     }
 
@@ -244,7 +252,7 @@ mod tests {
     fn pipelined_requests_handled_across_steps() {
         // Two keep-alive requests arrive together; each step handles one.
         let mut conn = Connection::new();
-        conn.feed(b"GET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n");
+        conn.feed(b"GET / HTTP/1.1\r\nHost: h\r\n\r\nGET / HTTP/1.1\r\nHost: h\r\n\r\n");
         assert!(matches!(conn.step(&router(), 0), Step::Write { .. }));
         assert!(matches!(conn.step(&router(), 0), Step::Write { .. }));
         assert_eq!(conn.step(&router(), 0), Step::NeedMore);
@@ -254,7 +262,7 @@ mod tests {
     fn response_carries_date_and_connection_headers() {
         // Every response gets a Date and an explicit Connection header.
         let mut conn = Connection::new();
-        conn.feed(b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+        conn.feed(b"GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n");
         let text = wire(&conn.step(&router(), 0));
         assert!(text.contains("Date: Thu, 01 Jan 1970 00:00:00 GMT\r\n"));
         assert!(text.contains("Connection: close\r\n"));
@@ -264,7 +272,7 @@ mod tests {
     fn security_headers_applied_only_when_policy_enables() {
         // Default policy: no security headers.
         let mut plain = Connection::new();
-        plain.feed(b"GET / HTTP/1.1\r\n\r\n");
+        plain.feed(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n");
         assert!(!wire(&plain.step(&router(), 0)).contains("X-Content-Type-Options"));
 
         // Enabled policy: standard security headers attached, even on errors.
@@ -278,5 +286,26 @@ mod tests {
         assert!(text.contains("X-Content-Type-Options: nosniff\r\n"));
         assert!(text.contains("X-Frame-Options: SAMEORIGIN\r\n"));
         assert!(text.contains("Referrer-Policy: strict-origin-when-cross-origin\r\n"));
+    }
+
+    #[test]
+    fn unknown_method_yields_501() {
+        // A well-formed but unimplemented method is 501, not 400 (RFC 9110 15.6.2).
+        let mut conn = Connection::new();
+        conn.feed(b"PROPFIND / HTTP/1.1\r\nHost: h\r\n\r\n");
+        assert!(wire(&conn.step(&router(), 0)).starts_with("HTTP/1.1 501 "));
+    }
+
+    #[test]
+    fn oversized_head_yields_431() {
+        // An over-limit header block is 431 (RFC 6585), not a generic 400.
+        let mut conn = Connection::new();
+        let mut req = Vec::from(&b"GET / HTTP/1.1\r\nHost: h\r\n"[..]);
+        while req.len() <= 8 * 1024 {
+            req.extend_from_slice(b"X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
+        }
+        req.extend_from_slice(b"\r\n");
+        conn.feed(&req);
+        assert!(wire(&conn.step(&router(), 0)).starts_with("HTTP/1.1 431 "));
     }
 }
