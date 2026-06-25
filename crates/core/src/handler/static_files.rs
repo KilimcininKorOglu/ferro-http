@@ -4,10 +4,12 @@
 //! backslashes, and control bytes). Canonical-prefix and symlink hardening,
 //! which need the filesystem, live in the std `AssetSource` and a later phase.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::asset::AssetSource;
+use crate::asset::{Asset, AssetSource};
+use crate::http::date::http_date;
 use crate::http::mime::mime_for;
 use crate::http::response::Response;
 use crate::http::status::StatusCode;
@@ -41,7 +43,7 @@ pub fn serve_static<A: AssetSource>(
                 c
             };
             if let Some(asset) = assets.load(&candidate) {
-                return Some(file_response(&candidate, asset.bytes, mime_overrides));
+                return Some(file_response(&candidate, asset, mime_overrides));
             }
         }
         None
@@ -49,15 +51,36 @@ pub fn serve_static<A: AssetSource>(
         let rel = segments.join("/");
         assets
             .load(&rel)
-            .map(|asset| file_response(&rel, asset.bytes, mime_overrides))
+            .map(|asset| file_response(&rel, asset, mime_overrides))
     }
 }
 
-fn file_response(name: &str, bytes: Vec<u8>, mime_overrides: &[(String, String)]) -> Response {
-    let mut response =
-        Response::new(StatusCode::OK).with_header("Content-Type", mime_for(name, mime_overrides));
-    response.body = bytes;
+/// Builds the `200 OK` response for an asset. `Accept-Ranges` is always
+/// advertised; `Last-Modified` and a strong `ETag` are added when the source
+/// provides an mtime, so the caller can short-circuit conditional requests.
+fn file_response(name: &str, asset: Asset, mime_overrides: &[(String, String)]) -> Response {
+    let mut response = Response::new(StatusCode::OK)
+        .with_header("Content-Type", mime_for(name, mime_overrides))
+        .with_header("Accept-Ranges", "bytes");
+    if let Some(mtime) = asset.mtime {
+        response = response
+            .with_header("Last-Modified", &http_date(mtime))
+            .with_header("ETag", &etag(asset.bytes.len(), mtime));
+    }
+    response.body = asset.bytes;
     response
+}
+
+/// A strong validator derived from the asset length and mtime: `"<len>-<mtime>"`.
+fn etag(len: usize, mtime: u64) -> String {
+    format!("\"{len:x}-{mtime:x}\"")
+}
+
+/// Whether `path` resolves to an existing static asset, using the same
+/// resolution as [`serve_static`]. Lets a caller answer OPTIONS/405 for a static
+/// resource (RFC 9110 15.5.6 / 9.3.7) instead of a misleading 404.
+pub fn static_exists<A: AssetSource>(path: &str, index_files: &[String], assets: &A) -> bool {
+    serve_static(path, index_files, assets, &[]).is_some()
 }
 
 /// Splits a decoded path into safe segments, or `None` if it is unsafe.
@@ -119,6 +142,9 @@ mod tests {
         files: Vec<(&'static str, &'static [u8])>,
     }
 
+    /// A fixed mtime so validator and conditional assertions are deterministic.
+    const MEM_MTIME: u64 = 1_582_934_400;
+
     impl AssetSource for MemAssets {
         fn load(&self, rel_path: &str) -> Option<crate::asset::Asset> {
             self.files
@@ -126,6 +152,7 @@ mod tests {
                 .find(|(name, _)| *name == rel_path)
                 .map(|(_, bytes)| crate::asset::Asset {
                     bytes: bytes.to_vec(),
+                    mtime: Some(MEM_MTIME),
                 })
         }
     }
@@ -197,5 +224,17 @@ mod tests {
     #[test]
     fn malformed_percent_escape_is_rejected() {
         assert!(serve_static("/style%2", &indexes(), &assets(), &no_mime()).is_none());
+    }
+
+    #[test]
+    fn served_file_advertises_validators_and_ranges() {
+        // A file from a source with an mtime must carry Last-Modified, a strong
+        // ETag, and Accept-Ranges so clients can revalidate and range-request.
+        let resp = serve_static("/style.css", &indexes(), &assets(), &no_mime()).expect("serve");
+        let has = |n: &str, v: &str| resp.headers.iter().any(|(hn, hv)| hn == n && hv == v);
+        assert!(has("Accept-Ranges", "bytes"));
+        assert!(has("Last-Modified", &http_date(MEM_MTIME)));
+        // "body{}" is 6 bytes -> ETag "6-<hex mtime>".
+        assert!(has("ETag", &format!("\"6-{MEM_MTIME:x}\"")));
     }
 }

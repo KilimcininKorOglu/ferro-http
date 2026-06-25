@@ -5,7 +5,8 @@ use std::net::Ipv6Addr;
 use std::sync::Mutex;
 
 use ferro_core::config::CompressionConfig;
-use ferro_core::handler::static_files::serve_static;
+use ferro_core::handler::static_files::{serve_static, static_exists};
+use ferro_core::http::conditional;
 use ferro_core::http::method::Method;
 use ferro_core::http::request::Request;
 use ferro_core::http::response::Response;
@@ -76,13 +77,13 @@ impl App {
                 &self.assets,
                 &self.mime_overrides,
             ) {
-                return response;
+                // Honor preconditions (304) and Range (206/416) before sending.
+                return conditional::evaluate(request, response);
             }
         }
         // The path is a known router resource but the method did not match:
         // answer OPTIONS with its methods and reject the rest with 405 + Allow
         // (RFC 9110 Section 15.5.6; QUERY discovery per RFC 10008 Appendix A.2).
-        // Static-only paths are not router resources and fall through to 404.
         let allowed = self.router.allowed_methods(request.path());
         if !allowed.is_empty() {
             let allow = allow_header_value(&allowed);
@@ -91,6 +92,16 @@ impl App {
             }
             return Response::text(StatusCode::METHOD_NOT_ALLOWED, "405 Method Not Allowed")
                 .with_header("Allow", &allow);
+        }
+        // An existing static file is also a known resource: answer OPTIONS and
+        // reject other methods with 405 + Allow rather than a misleading 404
+        // (RFC 9110 15.5.6 / 9.3.7). Static serving supports GET, HEAD, OPTIONS.
+        if static_exists(request.path(), &self.index_files, &self.assets) {
+            if request.method == Method::Options {
+                return Response::new(StatusCode::OK).with_header("Allow", "GET, HEAD, OPTIONS");
+            }
+            return Response::text(StatusCode::METHOD_NOT_ALLOWED, "405 Method Not Allowed")
+                .with_header("Allow", "GET, HEAD, OPTIONS");
         }
         Response::text(StatusCode::NOT_FOUND, "404 Not Found")
     }

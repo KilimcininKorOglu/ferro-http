@@ -65,8 +65,16 @@ impl AssetSource for FsAssets {
         if !meta.is_file() {
             return None;
         }
+        // Carry the modification time (Unix seconds) so the core can emit
+        // Last-Modified/ETag and answer conditional requests; absent if the
+        // platform cannot report it.
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
         let bytes = std::fs::read(&candidate).ok()?;
-        Some(Asset { bytes })
+        Some(Asset { bytes, mtime })
     }
 }
 

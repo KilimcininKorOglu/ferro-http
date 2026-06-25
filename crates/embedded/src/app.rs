@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use ferro_core::asset::AssetSource;
 use ferro_core::handler::static_files::serve_static;
+use ferro_core::http::conditional;
 use ferro_core::http::method::Method;
 use ferro_core::http::request::Request;
 use ferro_core::http::response::Response;
@@ -61,7 +62,9 @@ impl<A: AssetSource> Service for StaticRouter<A> {
                 &self.assets,
                 &self.mime_overrides,
             ) {
-                return response;
+                // Honor Range (and conditional requests, a no-op without an
+                // mtime validator) before sending.
+                return conditional::evaluate(request, response);
             }
         }
         Response::text(StatusCode::NOT_FOUND, "404 Not Found")

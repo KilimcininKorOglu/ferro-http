@@ -10,6 +10,11 @@ use alloc::vec::Vec;
 /// can serve it with zero-copy `sendfile`, without changing this trait.
 pub struct Asset {
     pub bytes: Vec<u8>,
+    /// Last-modified time in Unix seconds, when the source can provide one. It
+    /// drives `Last-Modified`/`ETag` and conditional-request handling. Sources
+    /// without a clock (such as compile-time embedded assets) use `None`, which
+    /// serves the asset without validators.
+    pub mtime: Option<u64>,
 }
 
 /// Supplies static asset bytes for a validated relative path.
@@ -62,6 +67,9 @@ impl AssetSource for EmbeddedAssets {
             .find(|(name, _)| *name == rel_path)
             .map(|(_, bytes)| Asset {
                 bytes: bytes.to_vec(),
+                // Compile-time assets have no filesystem clock, so they serve
+                // without a Last-Modified/ETag validator.
+                mtime: None,
             })
     }
 }

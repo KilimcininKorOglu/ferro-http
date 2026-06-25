@@ -1,5 +1,6 @@
 //! HTTP/1.1 primitives: methods, status codes, request parsing, responses.
 
+pub mod conditional;
 pub mod date;
 pub mod method;
 pub mod mime;
