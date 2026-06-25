@@ -12,13 +12,31 @@ All notable changes to this project are documented here. The format is based on
   helper enforces the media type (400 when absent, 415 with an `Accept-Query`
   field when unsupported), and a demo `QUERY /api/search` endpoint shows the
   flow alongside the GET API.
-- Method-aware discovery for router resources: `OPTIONS` returns the resource's
-  `Allow` set and an unsupported method returns `405 Method Not Allowed` with
-  `Allow`, instead of `404`. Static paths remain GET/HEAD-only.
+- Conditional requests for static files (RFC 9110): served files carry
+  `Last-Modified`, a strong `ETag`, and `Accept-Ranges`, and `If-None-Match`
+  or `If-Modified-Since` short-circuit to `304 Not Modified`.
+- Range requests for static files (RFC 9110): a single byte range is served as
+  `206 Partial Content` with `Content-Range` (including suffix ranges), and an
+  unsatisfiable range returns `416`.
+- `Expect: 100-continue` handling (RFC 9110): an interim `100 Continue` before
+  the body, and `417 Expectation Failed` for an unsupported expectation.
+- Method discovery for resources: `OPTIONS` (including server-wide `OPTIONS *`)
+  reports an `Allow` set, and an unsupported method returns `405` with `Allow`,
+  for both router routes and existing static files.
+- Status codes 100, 206, 304, 416, 417, and 431.
+
+### Changed
+- Stricter request validation per RFC 9110/9112: HTTP/1.1 requires a single
+  valid `Host`; a bare CR in the head and an oversized header block are
+  rejected; an absolute-form request target is accepted and reduced to its
+  path.
 
 ### Fixed
-- A HEAD request to a GET API route is now served (its body dropped at
-  serialization) instead of falling through to a 404.
+- A HEAD request to a GET route is now served (body dropped at serialization)
+  instead of falling through to a 404.
+- More accurate error statuses: an unrecognized method returns `501`, an
+  oversized header block `431`, an over-long target `414` (instead of a generic
+  400), and a clockless server omits `Date` (RFC 9110 6.6.1).
 
 ## [1.0.1] - 2026-06-23
 
