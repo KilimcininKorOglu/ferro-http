@@ -76,6 +76,27 @@ impl AssetSource for FsAssets {
         let bytes = std::fs::read(&candidate).ok()?;
         Some(Asset { bytes, mtime })
     }
+
+    fn exists(&self, rel_path: &str) -> bool {
+        // Same containment and symlink hardening as `load`, but stat-only: never
+        // read the file, so OPTIONS/405 on a static path cannot be amplified into
+        // a full file read.
+        let Ok(canonical_root) = self.root.canonicalize() else {
+            return false;
+        };
+        let Ok(candidate) = canonical_root.join(rel_path).canonicalize() else {
+            return false;
+        };
+        if !candidate.starts_with(&canonical_root) {
+            return false;
+        }
+        if !self.follow_symlinks && FsAssets::traverses_symlink(&canonical_root, rel_path) {
+            return false;
+        }
+        std::fs::metadata(&candidate)
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -116,6 +137,27 @@ mod tests {
             follow.load("link.txt").is_some(),
             "follow must serve an in-root symlink"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exists_agrees_with_load_without_reading() {
+        // exists() is the cheap probe for OPTIONS/405: it must report the same
+        // present/missing/escape verdict as load() while honoring the symlink
+        // posture, so callers never read a file just to answer a bodyless method.
+        let root = fresh_dir("exists");
+        std::fs::write(root.join("real.txt"), b"real").expect("write real");
+        symlink(root.join("real.txt"), root.join("link.txt")).expect("make symlink");
+
+        let no_follow = FsAssets::new(&root, false);
+        let follow = FsAssets::new(&root, true);
+
+        assert!(no_follow.exists("real.txt"));
+        assert!(!no_follow.exists("missing.txt"));
+        // The symlink verdict tracks the follow flag, exactly like load().
+        assert!(!no_follow.exists("link.txt"));
+        assert!(follow.exists("link.txt"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

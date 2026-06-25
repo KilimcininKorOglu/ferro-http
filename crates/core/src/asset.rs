@@ -25,6 +25,15 @@ pub trait AssetSource {
     /// Loads the asset at `rel_path` (relative, no leading slash), or `None`
     /// when it does not exist or is not a regular file.
     fn load(&self, rel_path: &str) -> Option<Asset>;
+
+    /// Whether a regular file exists at `rel_path`, without materializing its
+    /// bytes. Used to answer `OPTIONS`/`405` for a static resource cheaply; the
+    /// default loads and discards, so a source over a real filesystem should
+    /// override this to stat instead of read (avoiding a full read on a request
+    /// that returns no body).
+    fn exists(&self, rel_path: &str) -> bool {
+        self.load(rel_path).is_some()
+    }
 }
 
 /// An [`AssetSource`] backed by a compile-time table of `(path, bytes)` pairs.

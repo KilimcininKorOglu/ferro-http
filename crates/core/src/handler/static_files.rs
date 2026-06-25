@@ -27,31 +27,41 @@ pub fn serve_static<A: AssetSource>(
     assets: &A,
     mime_overrides: &[(String, String)],
 ) -> Option<Response> {
+    let candidates = candidate_paths(path, index_files)?;
+    for candidate in &candidates {
+        if let Some(asset) = assets.load(candidate) {
+            return Some(file_response(candidate, asset, mime_overrides));
+        }
+    }
+    None
+}
+
+/// Resolves a request `path` to the ordered relative asset paths to try, or
+/// `None` if the path is unsafe. A directory-style request (root or a trailing
+/// slash) yields one candidate per index file; a file request yields the single
+/// joined path. This is pure (no asset I/O) so callers can probe it with either
+/// [`AssetSource::load`] or the cheaper [`AssetSource::exists`].
+fn candidate_paths(path: &str, index_files: &[String]) -> Option<Vec<String>> {
     let decoded = percent_decode(path)?;
     let segments = sanitize(&decoded)?;
     let is_directory = segments.is_empty() || decoded.ends_with('/');
 
     if is_directory {
         let base = segments.join("/");
-        for index in index_files {
-            let candidate = if base.is_empty() {
-                index.clone()
-            } else {
-                let mut c = base.clone();
-                c.push('/');
-                c.push_str(index);
-                c
-            };
-            if let Some(asset) = assets.load(&candidate) {
-                return Some(file_response(&candidate, asset, mime_overrides));
-            }
-        }
-        None
+        Some(
+            index_files
+                .iter()
+                .map(|index| {
+                    if base.is_empty() {
+                        index.clone()
+                    } else {
+                        format!("{base}/{index}")
+                    }
+                })
+                .collect(),
+        )
     } else {
-        let rel = segments.join("/");
-        assets
-            .load(&rel)
-            .map(|asset| file_response(&rel, asset, mime_overrides))
+        Some(Vec::from([segments.join("/")]))
     }
 }
 
@@ -80,7 +90,10 @@ fn etag(len: usize, mtime: u64) -> String {
 /// resolution as [`serve_static`]. Lets a caller answer OPTIONS/405 for a static
 /// resource (RFC 9110 15.5.6 / 9.3.7) instead of a misleading 404.
 pub fn static_exists<A: AssetSource>(path: &str, index_files: &[String], assets: &A) -> bool {
-    serve_static(path, index_files, assets, &[]).is_some()
+    match candidate_paths(path, index_files) {
+        Some(candidates) => candidates.iter().any(|candidate| assets.exists(candidate)),
+        None => false,
+    }
 }
 
 /// Splits a decoded path into safe segments, or `None` if it is unsafe.
@@ -224,6 +237,20 @@ mod tests {
     #[test]
     fn malformed_percent_escape_is_rejected() {
         assert!(serve_static("/style%2", &indexes(), &assets(), &no_mime()).is_none());
+    }
+
+    #[test]
+    fn static_exists_matches_servable_paths() {
+        // static_exists answers OPTIONS/405 for a static resource, so it must
+        // agree with serve_static on what is servable: existing files and
+        // resolvable directory indexes are true; missing or unsafe paths are
+        // false. (It probes via AssetSource::exists, never loading the body.)
+        let a = assets();
+        assert!(static_exists("/style.css", &indexes(), &a));
+        assert!(static_exists("/", &indexes(), &a)); // root -> index.html
+        assert!(static_exists("/dir/", &indexes(), &a)); // dir index
+        assert!(!static_exists("/nope.txt", &indexes(), &a));
+        assert!(!static_exists("/../secret", &indexes(), &a));
     }
 
     #[test]
