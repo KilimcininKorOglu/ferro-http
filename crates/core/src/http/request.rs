@@ -55,11 +55,38 @@ impl Request {
             .map(|h| h.value.as_str())
     }
 
-    /// The request path, with any query string stripped.
+    /// The request path, with any query string stripped. An absolute-form target
+    /// (`scheme://authority/path`, which a server MUST accept per RFC 9112 3.2.1)
+    /// is reduced to its path component.
     pub fn path(&self) -> &str {
-        match self.target.split_once('?') {
+        let target = self.absolute_form_path().unwrap_or(&self.target);
+        match target.split_once('?') {
             Some((p, _)) => p,
-            None => &self.target,
+            None => target,
+        }
+    }
+
+    /// For an absolute-form target, returns the path component (from the first
+    /// `/` after the authority, or `/` when none); `None` for origin-form. The
+    /// scheme must be a real scheme so a `://` inside a query is not mistaken for
+    /// absolute-form.
+    fn absolute_form_path(&self) -> Option<&str> {
+        let scheme_end = self.target.find("://")?;
+        let scheme = &self.target[..scheme_end];
+        let valid_scheme = scheme
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        if !valid_scheme {
+            return None;
+        }
+        let after_authority = &self.target[scheme_end + 3..];
+        match after_authority.find('/') {
+            Some(i) => Some(&after_authority[i..]),
+            None => Some("/"),
         }
     }
 
@@ -773,5 +800,21 @@ mod tests {
         raw.extend(core::iter::repeat(b'a').take(MAX_TARGET_BYTES));
         raw.extend_from_slice(b" HTTP/1.1\r\nHost: h\r\n\r\n");
         assert_eq!(parse(&raw), Err(ParseError::TargetTooLong));
+    }
+
+    #[test]
+    fn absolute_form_target_reduces_to_path() {
+        // RFC 9112 3.2.1: a server MUST accept absolute-form and route by its path.
+        let (req, _) =
+            complete(b"GET http://example.com/a/b?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        assert_eq!(req.path(), "/a/b");
+    }
+
+    #[test]
+    fn scheme_in_query_is_not_absolute_form() {
+        // A "://" inside the query must not be mistaken for absolute-form; the
+        // origin-form path is preserved so routing is not hijacked.
+        let (req, _) = complete(b"GET /go?url=http://evil/x HTTP/1.1\r\nHost: h\r\n\r\n");
+        assert_eq!(req.path(), "/go");
     }
 }
