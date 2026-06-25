@@ -80,11 +80,17 @@ impl Response {
             head.push_str("\r\n");
         }
 
-        head.push_str(&format!("Content-Length: {}\r\n", self.body.len()));
+        // 1xx/204/304 responses carry neither a body nor a Content-Length
+        // (RFC 9112 6.3, RFC 9110 15.4.5); every other response derives its
+        // length from the body.
+        let empty_body = self.status.is_empty_body();
+        if !empty_body {
+            head.push_str(&format!("Content-Length: {}\r\n", self.body.len()));
+        }
         head.push_str("\r\n");
 
         let mut out = head.into_bytes();
-        if !head_only {
+        if !head_only && !empty_body {
             out.extend_from_slice(&self.body);
         }
         out
@@ -152,5 +158,19 @@ mod tests {
         assert!(!wire.contains("Injected: 1"));
         assert!(!wire.contains("X-Bad"));
         assert!(wire.contains("X-Good: ok\r\n"));
+    }
+
+    #[test]
+    fn empty_body_status_omits_body_and_length() {
+        // A 304 (like 204 and 1xx) must carry neither a body nor a Content-Length,
+        // even if a body was set, but keeps its validators (RFC 9112 6.3).
+        let mut resp = Response::new(StatusCode::NOT_MODIFIED).with_header("ETag", "\"abc\"");
+        resp.body = b"should not be sent".to_vec();
+        let wire = as_text(&resp.serialize(false));
+        assert!(wire.starts_with("HTTP/1.1 304 Not Modified\r\n"));
+        assert!(wire.contains("ETag: \"abc\"\r\n"));
+        assert!(!wire.contains("Content-Length"));
+        assert!(wire.ends_with("\r\n\r\n"));
+        assert!(!wire.contains("should not be sent"));
     }
 }

@@ -10,6 +10,8 @@ impl StatusCode {
     pub const OK: StatusCode = StatusCode(200);
     pub const CREATED: StatusCode = StatusCode(201);
     pub const NO_CONTENT: StatusCode = StatusCode(204);
+    pub const PARTIAL_CONTENT: StatusCode = StatusCode(206);
+    pub const NOT_MODIFIED: StatusCode = StatusCode(304);
     pub const BAD_REQUEST: StatusCode = StatusCode(400);
     pub const UNAUTHORIZED: StatusCode = StatusCode(401);
     pub const FORBIDDEN: StatusCode = StatusCode(403);
@@ -18,6 +20,7 @@ impl StatusCode {
     pub const PAYLOAD_TOO_LARGE: StatusCode = StatusCode(413);
     pub const URI_TOO_LONG: StatusCode = StatusCode(414);
     pub const UNSUPPORTED_MEDIA_TYPE: StatusCode = StatusCode(415);
+    pub const RANGE_NOT_SATISFIABLE: StatusCode = StatusCode(416);
     pub const IM_A_TEAPOT: StatusCode = StatusCode(418);
     pub const TOO_MANY_REQUESTS: StatusCode = StatusCode(429);
     pub const REQUEST_HEADER_FIELDS_TOO_LARGE: StatusCode = StatusCode(431);
@@ -41,6 +44,8 @@ impl StatusCode {
             200 => "OK",
             201 => "Created",
             204 => "No Content",
+            206 => "Partial Content",
+            304 => "Not Modified",
             400 => "Bad Request",
             401 => "Unauthorized",
             403 => "Forbidden",
@@ -49,6 +54,7 @@ impl StatusCode {
             413 => "Content Too Large",
             414 => "URI Too Long",
             415 => "Unsupported Media Type",
+            416 => "Range Not Satisfiable",
             418 => "I'm a teapot",
             429 => "Too Many Requests",
             431 => "Request Header Fields Too Large",
@@ -57,6 +63,12 @@ impl StatusCode {
             505 => "HTTP Version Not Supported",
             _ => "",
         }
+    }
+
+    /// Whether a response with this status must carry neither a message body nor
+    /// a `Content-Length` (1xx, 204, 304), per RFC 9112 6.3 and RFC 9110 15.4.5.
+    pub fn is_empty_body(&self) -> bool {
+        matches!(self.0, 100..=199 | 204 | 304)
     }
 }
 
